@@ -76,15 +76,20 @@ cmake -S tools/translator -B build-translator -G Ninja \
   -DCAPSTONE_LIBRARY="$(brew --prefix capstone)/lib/libcapstone.a"
 cmake --build build-translator --target aps5-translator aps5-translator-runtime --parallel 2
 ctest --test-dir build-translator --output-on-failure --no-tests=error \
-  -R '^native_(fixture_reporting|translator_cli)$'
+  -R '^native_(fixture_reporting|translator_cli|ffmpeg_fetch)$'
+python3 tools/macos/fetch_ffmpeg.py --architecture arm64 \
+  --destination "$PWD/build-ffmpeg-arm64" --report diagnostics/ffmpeg-acquisition.json
 cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-  -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64
+  -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DFFMPEG_PREBUILT_DIR:PATH="$PWD/build-ffmpeg-arm64"
 cmake --build build-arm64 --target core/libs/libs/libc.prx --parallel 2
 python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm64/core/libs/libs \
   diagnostics/native --report diagnostics/native/report.json
 ```
 
 The root configure needs the branch's submodules. The `core/libs/libs/libc.prx` Ninja target builds libc and the NID patcher, then patches and signs the arm64 library without building all PRX modules. The unpatched library is not a substitute.
+
+Root configuration also enters the existing FFmpeg dependency before selecting the libc build target. `fetch_ffmpeg.py` checks its gitlink and clean submodule revision against the pinned macOS package manifest, verifies the archive size and SHA-256, validates regular-file paths and required library/license metadata, and publishes a fresh directory atomically. It refuses an existing destination. The helper records each HTTP attempt and makes at most three attempts for selected transient HTTP or transport errors. It starts with the release URL; after a transient failure, remaining attempts use the same pinned asset through GitHub's asset API with `Accept: application/octet-stream`, without authentication. Certificate, metadata, checksum and archive-validation failures are final. The workflow bounds the acquisition step to six minutes and binds the successful report to `FFMPEG_PREBUILT_DIR` in CMake's cache. The helper also accepts `--architecture x64` for the existing x86-64 package. Its unit tests require no network. This selects the same pinned package through the upstream CMake interface without changing media-library linkage or third-party sources.
 
 The runner requires `import`, `lifter-smoke`, `vector-smoke`, `cmpxchg-alias`, `cmpxchg-amd-register`, `lea-address-size` and `leave-operand-size`. Every case receives a pass, fail or skip result; any failed or skipped required case makes the command fail. Missing guest tools and a failed reference compilation cannot reduce the required count. Each invocation creates a new directory under the supplied work directory and retains its logs and executables. The JSON report records the host, tool versions, translator build information, input binary SHA-256 digests, each stage's output and the required result counts. Guest fixture construction still uses the shared `guesttools.py` helpers; their subprocess output is in the invoking job's log. Binary hashes identify the inputs actually used and do not imply a source commit.
 

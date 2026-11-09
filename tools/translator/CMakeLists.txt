@@ -28,5 +28,7 @@ if(BUILD_TESTING)
         -s ${CMAKE_CURRENT_SOURCE_DIR}/../tests -p test_native_fixture_runner.py)
     add_test(NAME native_translator_cli COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_translator_cli.py $<TARGET_FILE:aps5-translator>)
-    set_tests_properties(native_fixture_reporting native_translator_cli PROPERTIES TIMEOUT 30)
+    add_test(NAME native_ffmpeg_fetch COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_ffmpeg_fetch.py)
+    set_tests_properties(native_fixture_reporting native_translator_cli native_ffmpeg_fetch PROPERTIES TIMEOUT 30)
 endif()

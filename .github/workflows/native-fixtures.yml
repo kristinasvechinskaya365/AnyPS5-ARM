@@ -13,6 +13,8 @@ on:
       - core/relinker/**
       - tools/translator/**
       - tools/tests/test_native_fixture_runner.py
+      - tools/tests/test_ffmpeg_fetch.py
+      - tools/macos/fetch_ffmpeg.py
       - docs/dev/NATIVE_ARM64.md
   workflow_dispatch:
 
@@ -119,7 +121,7 @@ jobs:
     env:
       BASELINE_REVISION: 795aa430be2bbb60054c0ad2e0a0812c81f91318
       CMAKE_BUILD_PARALLEL_LEVEL: 2
-      REQUIRED_CTESTS: '^native_(fixture_reporting|translator_cli)$'
+      REQUIRED_CTESTS: '^native_(fixture_reporting|translator_cli|ffmpeg_fetch)$'
     steps:
       - name: Check out tested revision and pinned submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -201,16 +203,25 @@ jobs:
           lipo build-translator/aps5-translator -verify_arch arm64
           lipo build-translator/libaps5-translator-runtime.a -verify_arch arm64
           build-translator/aps5-translator --build-info --cpu apple-m1 | tee diagnostics/translator-build-info.json
-      - name: Run both required translator CTests
+      - name: Run all three required translator CTests
         run: |
           ctest --test-dir build-translator -R "$REQUIRED_CTESTS" --output-on-failure \
             --timeout 30 --parallel 2 --no-tests=error \
             --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Acquire the pinned FFmpeg package with content verification
+        timeout-minutes: 6
+        run: |
+          python3 tools/macos/fetch_ffmpeg.py --architecture arm64 \
+            --destination "$RUNNER_TEMP/ffmpeg-arm64" --report diagnostics/ffmpeg-acquisition.json \
+            2>&1 | tee diagnostics/ffmpeg-acquisition.log
       - name: Build only the patched native libc fixture dependency
         timeout-minutes: 25
         run: |
           cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-            -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 2>&1 | tee diagnostics/libc-configure.log
+            -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DFFMPEG_PREBUILT_DIR:PATH="$RUNNER_TEMP/ffmpeg-arm64" 2>&1 | tee diagnostics/libc-configure.log
+          python3 -c 'import pathlib, sys; assert sys.argv[2] in pathlib.Path(sys.argv[1]).read_text().splitlines()' \
+            build-arm64/CMakeCache.txt "FFMPEG_PREBUILT_DIR:PATH=$RUNNER_TEMP/ffmpeg-arm64"
           cmake --build build-arm64 --target core/libs/libs/libc.prx --parallel 2 2>&1 | tee diagnostics/libc-build.log
           file build-arm64/core/libs/libs/libc.prx | tee diagnostics/libc-binary.txt
           lipo build-arm64/core/libs/libs/libc.prx -verify_arch arm64
@@ -359,7 +370,7 @@ jobs:
           from pathlib import Path
 
           errors = []
-          required_ctests = {"native_fixture_reporting": 27, "native_translator_cli": 4}
+          required_ctests = {"native_fixture_reporting": 27, "native_translator_cli": 4, "native_ffmpeg_fetch": 21}
           required_fixtures = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size", "leave-operand-size"]
           failures = {"leave-operand-size": "leave operand-size mismatch"}
 
@@ -466,6 +477,32 @@ jobs:
               errors.append(f"CTest evidence: {error}")
 
           try:
+              acquisition = json.loads(Path("diagnostics/ffmpeg-acquisition.json").read_text())
+              ffmpeg_revision = "9ac4cfd195f192ed8b08566f49c28dbb48d08341"
+              destination = Path(os.environ["RUNNER_TEMP"]) / "ffmpeg-arm64"
+              require(type(acquisition["schema_version"]) is int and acquisition["schema_version"] == 1 and acquisition["passed"] is True and acquisition["stage"] == "complete" and "error" not in acquisition, "FFmpeg acquisition did not complete")
+              require(acquisition["source_revision"] == os.environ["GITHUB_SHA"] and acquisition["revision"] == acquisition["gitlink_revision"] == acquisition["submodule_revision"] == ffmpeg_revision, "FFmpeg source revisions do not match the pinned dependency")
+              require(acquisition["dependency"] == "FFmpeg" and acquisition["architecture"] == "arm64" and Path(acquisition["destination"]).resolve() == destination.resolve(), "FFmpeg package architecture or destination is incorrect")
+              require(acquisition["helper_sha256"] == hashlib.sha256(Path("tools/macos/fetch_ffmpeg.py").read_bytes()).hexdigest(), "FFmpeg acquisition helper identity changed")
+              require(acquisition["asset"] == {"name": "ffmpeg-macos-arm64.zip", "url": f"https://github.com/KytyPS5/ext-ffmpeg-core/releases/download/{ffmpeg_revision[:12]}/ffmpeg-macos-arm64.zip", "asset_id": 567718242, "api_url": "https://api.github.com/repos/KytyPS5/ext-ffmpeg-core/releases/assets/567718242", "sha256": "458933af900b2bf0bf3d4422e3ae1c7aef46f671cd4af99c42ffe99d43ca9170", "size": 13316412}, "FFmpeg asset differs from the verified manifest")
+              attempts = acquisition["attempts"]
+              require(1 <= len(attempts) <= 3 and [entry["number"] for entry in attempts] == list(range(1, len(attempts) + 1)), "FFmpeg acquisition attempts are incomplete")
+              for index, entry in enumerate(attempts):
+                  require(entry["route"] == ("release" if index == 0 else "asset-api") and entry["url"] == acquisition["asset"]["url" if index == 0 else "api_url"] and entry["accept"] == (None if index == 0 else "application/octet-stream"), "FFmpeg acquisition used an unexpected route")
+              require(all(entry.get("transient") is True and "error_type" in entry for entry in attempts[:-1]), "FFmpeg acquisition retried a permanent failure")
+              require(attempts[-1]["http_status"] == 200 and attempts[-1]["bytes"] == acquisition["asset"]["size"] and attempts[-1]["sha256"] == acquisition["asset"]["sha256"] and "error_type" not in attempts[-1], "FFmpeg transfer lacks verified completion evidence")
+              names = [entry["path"] for entry in acquisition["files"]]
+              actual_names = sorted(str(path.relative_to(destination)) for path in destination.rglob("*") if path.is_file())
+              require(len(names) == 155 and len(set(names)) == 155 and sorted(names) == actual_names, "FFmpeg package inventory is incomplete")
+              for entry in acquisition["files"]:
+                  path = destination / entry["path"]
+                  require(path.resolve().is_relative_to(destination.resolve()) and not path.is_symlink() and path.is_file(), "FFmpeg package contains an invalid file")
+                  require(type(entry["size"]) is int and entry["size"] == path.stat().st_size and entry["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest(), f"FFmpeg file identity differs: {entry['path']}")
+              require(f"FFMPEG_PREBUILT_DIR:PATH={destination}" in Path("build-arm64/CMakeCache.txt").read_text().splitlines(), "CMake did not select the verified FFmpeg package")
+          except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
+              errors.append(f"FFmpeg acquisition evidence: {error}")
+
+          try:
               source = json.loads(Path("diagnostics/source.json").read_text())
               require(source["revision"] == source["event_revision"] == os.environ["GITHUB_SHA"], "source revision does not match this run")
               candidate = verify_run(json.loads(Path("diagnostics/native/report.json").read_text()), Path("build-translator"), Path("diagnostics/native"))
@@ -496,7 +533,7 @@ jobs:
 
           result = {"revision": os.environ.get("GITHUB_SHA"), "passed": not errors, "required_ctests": list(required_ctests), "required_fixtures": required_fixtures, "errors": errors}
           Path("diagnostics/gate.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-          summary = f"### Native arm64 fixture gate\n\nRevision: `{result['revision']}`\n\nResult: {'FAIL' if errors else 'PASS'}; required CTests: 2; required native fixtures: 7.\n\n"
+          summary = f"### Native arm64 fixture gate\n\nRevision: `{result['revision']}`\n\nResult: {'FAIL' if errors else 'PASS'}; required CTests: 3; required native fixtures: 7.\n\n"
           summary += "\n".join(f"- {error}" for error in errors) + "\n\nCoverage: seven native CPU fixtures with x86-64 Rosetta references, the independent AMD integer model and the expected baseline LEAVE operand-size failure. This run does not validate games or GPU behavior.\n"
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
               stream.write(summary)
