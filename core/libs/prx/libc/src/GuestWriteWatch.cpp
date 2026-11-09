@@ -614,6 +614,7 @@ public:
             _hostWrites.emplace_back(begin, end);
             forEachPage(begin, end, [&](std::uintptr_t page, std::uint8_t& state) {
                 if ((state & Protected) != 0) ::mprotect(reinterpret_cast<void*>(page), _page, state & ProtectionMask);
+                if ((state & Hot) != 0) _snapshots.erase(page);
                 state = static_cast<std::uint8_t>((state & (ProtectionMask | Fresh)) | Written);
             });
         });
