@@ -20,3 +20,13 @@ target_link_libraries(aps5-translator PRIVATE ${translatorLlvmLibraries} ${CAPST
 # Linked into every translated executable together with the object aps5-translator writes.
 add_library(aps5-translator-runtime STATIC runtime/Runtime.cpp runtime/HostBridge.S)
 set_target_properties(aps5-translator-runtime PROPERTIES OSX_ARCHITECTURES arm64)
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME native_fixture_reporting COMMAND ${Python3_EXECUTABLE} -m unittest discover
+        -s ${CMAKE_CURRENT_SOURCE_DIR}/../tests -p test_native_fixture_runner.py)
+    add_test(NAME native_translator_cli COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_translator_cli.py $<TARGET_FILE:aps5-translator>)
+    set_tests_properties(native_fixture_reporting native_translator_cli PROPERTIES TIMEOUT 30)
+endif()

@@ -62,13 +62,32 @@ The relinker already decodes guest code (TLS scan, `--to-intel`). In the arm64 m
 
 ## Building and running the translator
 
-The translator builds on its own because it needs LLVM and Capstone (Homebrew `llvm` and `capstone`):
+The translator builds on its own because it needs LLVM and Capstone. The fixture gate requires a native arm64 Python process on macOS, LLVM 22, Capstone, the Apple SDK and the patched arm64 `libc.prx` from this branch. The vector reference runs as x86-64 under Rosetta; the translated executables run directly as arm64. Homebrew packages LLD separately from LLVM.
 
 ```sh
-cmake -S tools/translator -B build-translator -G Ninja -DLLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm
-ninja -C build-translator
-python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm64/core/libs/libs
+brew install llvm@22 lld@22 capstone cmake ninja
+export ANYPS5_LLVM_BIN="$(brew --prefix llvm@22)/bin"
+export PATH="$(brew --prefix lld@22)/bin:$PATH"
+cmake -S tools/translator -B build-translator -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DLLVM_DIR="$(brew --prefix llvm@22)/lib/cmake/llvm" \
+  -DCAPSTONE_INCLUDE_DIR="$(brew --prefix capstone)/include" \
+  -DCAPSTONE_LIBRARY="$(brew --prefix capstone)/lib/libcapstone.a"
+cmake --build build-translator --target aps5-translator aps5-translator-runtime --parallel 2
+ctest --test-dir build-translator --output-on-failure --no-tests=error \
+  -R '^native_(fixture_reporting|translator_cli)$'
+cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build build-arm64 --target core/libs/libs/libc.prx --parallel 2
+python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm64/core/libs/libs \
+  diagnostics/native --report diagnostics/native/report.json
 ```
+
+The root configure needs the branch's submodules. The `core/libs/libs/libc.prx` Ninja target builds libc and the NID patcher, then patches and signs the arm64 library without building all PRX modules. The unpatched library is not a substitute.
+
+The runner requires `import`, `lifter-smoke` and `vector-smoke`. Every case receives a pass, fail or skip result; any failed or skipped required case makes the command fail. Missing guest tools and a failed reference compilation cannot reduce the required count. Each invocation creates a new directory under the supplied work directory and retains its logs and executables. The JSON report records the host, tool versions, translator build information, input binary SHA-256 digests, each stage's output and the required result counts. Guest fixture construction still uses the shared `guesttools.py` helpers; their subprocess output is in the invoking job's log. Binary hashes identify the inputs actually used and do not imply a source commit.
+
+`aps5-translator --build-info` reports the linked LLVM version, Capstone API version, target triple, CPU and optimization level. The default CPU remains `apple-m1`. `--cpu apple-m2` is optional on both the translator and the fixture runner; the translator rejects CPU names unsupported by its LLVM build before reading the guest or creating output. Selecting a CPU does not establish instruction, ABI or memory-order correctness beyond the fixtures exercised.
 
 `aps5-translator <eboot.elf> <guest.o>` writes one arm64 object with the lifted functions, the guest image and the function table. The image's relocated slots are symbolic, so the host linker binds the guest's imports to the NID exports of the arm64 prx libraries. Linking it with `libaps5-translator-runtime.a` and the needed `.prx` files gives a native executable.
 
