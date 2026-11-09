@@ -1,0 +1,255 @@
+name: macOS foundation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/macos-foundation.yml
+      - .github/anytogether-ci/ctest-known-failures.txt
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/relinker/**
+      - core/libs/CMakeLists.txt
+      - core/libs/prx/libc/**
+      - core/libs/prx/libkernel/**
+      - core/libs/tests/GuestDirectMemory*.cpp
+      - tools/title_run.py
+      - tools/titles.json
+      - tools/required_test_report.py
+      - tools/tests/test_title_run.py
+      - tools/tests/test_required_test_report.py
+      - tools/macos/launcher/**
+  push:
+    branches: [main, 'codex/**']
+    paths:
+      - .github/workflows/macos-foundation.yml
+      - .github/anytogether-ci/ctest-known-failures.txt
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/relinker/**
+      - core/libs/CMakeLists.txt
+      - core/libs/prx/libc/**
+      - core/libs/prx/libkernel/**
+      - core/libs/tests/GuestDirectMemory*.cpp
+      - tools/title_run.py
+      - tools/titles.json
+      - tools/required_test_report.py
+      - tools/tests/test_title_run.py
+      - tools/tests/test_required_test_report.py
+      - tools/macos/launcher/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-foundation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  portable-tools:
+    name: Portable runner and report tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Run required Python suites
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY' 2>&1 | tee diagnostics/python.log
+          import json
+          import os
+          import platform
+          import subprocess
+          import sys
+          import unittest
+          from pathlib import Path
+
+          modules = ["tools.tests.test_title_run", "tools.tests.test_required_test_report"]
+          suites = [unittest.defaultTestLoader.loadTestsFromName(name) for name in modules]
+          registered = dict(zip(modules, [suite.countTestCases() for suite in suites]))
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(suites))
+          allowed = {"LoadExec hand-over is Windows-specific", "job process list is Windows-specific", "window placement is Windows-specific"}
+          skips = [{"test": str(test), "reason": reason} for test, reason in result.skipped]
+          unexpected = [skip for skip in skips if skip["reason"] not in allowed]
+          data = {
+              "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "event_revision": os.environ.get("GITHUB_SHA"), "python": sys.version, "host": platform.platform(),
+              "registered": registered, "executed": result.testsRun,
+              "passed": result.testsRun - len(result.failures) - len(result.errors) - len(skips) - len(result.expectedFailures) - len(result.unexpectedSuccesses),
+              "failed": len(result.failures), "errors": len(result.errors), "skipped": skips,
+              "expected_failures": len(result.expectedFailures), "unexpected_successes": len(result.unexpectedSuccesses),
+          }
+          Path("diagnostics/python.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          summary = f"### Portable Python tests\n\nRevision: `{data['revision']}`\n\nExecuted: {data['executed']}; passed: {data['passed']}; failed: {data['failed']}; errors: {data['errors']}; skipped: {len(skips)}.\n"
+          summary += "\n".join(f"- {skip['test']}: {skip['reason']}" for skip in skips) + "\n"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+              stream.write(summary)
+          sys.exit(not result.wasSuccessful() or not all(registered.values()) or result.testsRun != sum(registered.values()) or bool(unexpected) or bool(result.expectedFailures))
+          PY
+      - name: Upload Python diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: foundation-python-${{ github.sha }}
+          path: diagnostics/
+          retention-days: 7
+          if-no-files-found: error
+
+  macos-runtime:
+    name: Required macOS core tests under Rosetta
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      REQUIRED_TESTS: '^(guest_direct_memory_lifecycle|guest_direct_memory_for_app|title_run|macos_output|macos_fixed_base|sce_module_path)$'
+    steps:
+      - name: Check out tested revision and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Record machine and source identity
+        run: |
+          mkdir -p diagnostics
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            sw_vers
+            uname -a
+            sysctl hw.model hw.memsize hw.ncpu
+            xcodebuild -version
+            xcrun clang --version
+            cmake --version
+            python3 --version
+            printf 'Build cache: none restored\nCoverage: hosted VM CPU/runtime fixtures; no GPU or game validation\n'
+          } > diagnostics/identity.txt
+          cp .github/anytogether-ci/ctest-known-failures.txt diagnostics/known-failures.txt
+          test "$(uname -m)" = arm64
+      - name: Install Rosetta and Ninja
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          brew install ninja 2>&1 | tee diagnostics/ninja.log
+          arch -x86_64 uname -m | tee diagnostics/rosetta-architecture.txt
+      - name: Configure the x86-64 runtime
+        run: |
+          cmake -S . -B build-foundation -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DPython3_EXECUTABLE="$(command -v python3)" 2>&1 | tee diagnostics/configure.log
+          ctest --test-dir build-foundation --show-only=json-v1 --no-tests=error > diagnostics/ctest-inventory.json
+      - name: Build the relinker and required memory fixtures
+        run: |
+          cmake --build build-foundation --parallel 2 --target \
+            relinker guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests 2>&1 | tee diagnostics/build.log
+          file build-foundation/tests/guest_direct_memory_lifecycle_tests build-foundation/core/relinker/relinker > diagnostics/binaries.txt
+          lipo -verify_arch x86_64 build-foundation/tests/guest_direct_memory_lifecycle_tests
+          lipo -verify_arch x86_64 build-foundation/core/relinker/relinker
+          shasum -a 256 build-foundation/tests/guest_direct_memory_lifecycle_tests \
+            build-foundation/core/relinker/relinker build-foundation/core/libs/libs/unpatched/libkernel.prx \
+            build-foundation/core/libs/libs/unpatched/libc.prx > diagnostics/binary-sha256.txt
+      - name: Execute required tests without retries or exclusions
+        run: |
+          ctest --test-dir build-foundation -R "$REQUIRED_TESTS" --output-on-failure \
+            --timeout 30 --parallel 1 --no-tests=error --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Require every selected test to report a pass
+        if: always()
+        run: |
+          python3 tools/required_test_report.py --inventory diagnostics/ctest-inventory.json \
+            --junit diagnostics/ctest.xml --output diagnostics/runtime-report.json \
+            --known-failures .github/anytogether-ci/ctest-known-failures.txt \
+            --require guest_direct_memory_lifecycle --require guest_direct_memory_for_app \
+            --require title_run --require macos_output --require macos_fixed_base --require sce_module_path
+      - name: Upload runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: foundation-macos-runtime-${{ github.sha }}
+          path: |
+            diagnostics/
+            build-foundation/CMakeCache.txt
+            build-foundation/CMakeFiles/CMakeConfigureLog.yaml
+            build-foundation/Testing/Temporary/
+          retention-days: 7
+          if-no-files-found: error
+
+  macos-installer:
+    name: Required Swift installer contract tests
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Record Swift toolchain
+        run: |
+          mkdir -p diagnostics
+          {
+            git rev-parse HEAD
+            sw_vers
+            uname -a
+            xcodebuild -version
+            swift --version
+            printf 'Build cache: none restored\nCoverage: synthetic installer and process fixtures; no commercial assets\n'
+          } > diagnostics/identity.txt
+      - name: Build the shared command-line installer
+        run: |
+          swift build --package-path tools/macos/launcher --product anyps5-tool --jobs 2 2>&1 | tee diagnostics/swift-build.log
+          shasum -a 256 tools/macos/launcher/.build/debug/anyps5-tool > diagnostics/binary-sha256.txt
+      - name: Discover required Swift test cases
+        run: |
+          swift test --package-path tools/macos/launcher --jobs 2 list > diagnostics/swift-inventory.txt 2> diagnostics/swift-discovery.log
+      - name: Execute required Swift tests
+        run: |
+          swift test --package-path tools/macos/launcher --skip-build --verbose --parallel --num-workers 2 \
+            --filter 'RelinkInputsTests|InstallerRunTests' --xunit-output "$PWD/diagnostics/swift.xml" 2>&1 | tee diagnostics/swift-tests.log
+      - name: Require both installer suites and every discovered case
+        if: always()
+        run: |
+          python3 tools/required_test_report.py --kind swift --inventory diagnostics/swift-inventory.txt \
+            --junit diagnostics/swift.xml --log diagnostics/swift-tests.log --output diagnostics/installer-report.json \
+            --require 'AnyPS5CoreTests\.RelinkInputsTests/[^\s]+' --require 'AnyPS5CoreTests\.InstallerRunTests/[^\s]+'
+      - name: Upload installer diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: foundation-macos-installer-${{ github.sha }}
+          path: diagnostics/
+          retention-days: 7
+          if-no-files-found: error
+
+  foundation-ok:
+    name: macos-foundation-ok
+    needs: [portable-tools, macos-runtime, macos-installer]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all foundation jobs
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          jobs = json.loads(os.environ["JOB_RESULTS"])
+          required = {"portable-tools", "macos-runtime", "macos-installer"}
+          failed = sorted(name for name in required if jobs.get(name, {}).get("result") != "success")
+          summary = "### macOS foundation jobs\n\n" + "\n".join(f"- {name}: {jobs.get(name, {}).get('result', 'missing')}" for name in sorted(required)) + "\n"
+          print(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+              stream.write(summary)
+          sys.exit(bool(failed))
+          PY
