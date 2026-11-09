@@ -11,13 +11,13 @@ void exit(int);
         (void)destination; \
         u64 value = *accumulator; \
         __asm__ volatile("cmpxchg" SUFFIX " %%" SOURCE ", %%" ACCUMULATOR "\n\t" CAPTURE_FLAGS \
-                         : "+a"(value), FLAG_OUTPUTS : "c"(source) : "cc"); \
+                         : "+&a"(value), FLAG_OUTPUTS : "c"(source) : "cc"); \
         *accumulator = value; \
     } \
     static void separate##BITS(u64* accumulator, u64* destination, u64 source, unsigned char* flags) { \
         u64 value = *accumulator, target = *destination; \
         __asm__ volatile("cmpxchg" SUFFIX " %%" SOURCE ", %%" DESTINATION "\n\t" CAPTURE_FLAGS \
-                         : "+a"(value), "+b"(target), FLAG_OUTPUTS : "c"(source) : "cc"); \
+                         : "+&a"(value), "+&b"(target), FLAG_OUTPUTS : "c"(source) : "cc"); \
         *accumulator = value; \
         *destination = target; \
     }
@@ -31,7 +31,7 @@ static void high_source(u64* accumulator, u64* destination, u64 source, unsigned
     (void)destination;
     (void)source;
     u64 value = *accumulator;
-    __asm__ volatile("cmpxchgb %%ah, %%al\n\t" CAPTURE_FLAGS : "+a"(value), FLAG_OUTPUTS : : "cc");
+    __asm__ volatile("cmpxchgb %%ah, %%al\n\t" CAPTURE_FLAGS : "+&a"(value), FLAG_OUTPUTS : : "cc");
     *accumulator = value;
 }
 
