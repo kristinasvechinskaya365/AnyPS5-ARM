@@ -34,7 +34,6 @@ windows agc_frame_generation            The test executable does not start on Wi
 all     precise_wait                    Spin/sleep deadline test; upstream's own release job leaves it out too.
 
 # macOS: x86-64 under Rosetta in a virtual machine, and no MoltenVK on the runner.
-macos   macos_fixtures                  Its argv fixture ends in int3, which stays exiting in the kernel under Rosetta.
 macos   guest_kernel_fcntl              Flaky under parallel ctest on macOS.
 macos   agc_thread_priority_refused_rt  Expects a refused real-time priority request to throw; macOS grants it.
 macos   agc_thread_priority_refused_high  Same as above, high priority.

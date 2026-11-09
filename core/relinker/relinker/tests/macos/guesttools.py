@@ -6,8 +6,15 @@ from nid import nid
 LLVM = os.environ.get("ANYPS5_LLVM_BIN", "/opt/homebrew/opt/llvm/bin")
 TARGET = "--target=x86_64-unknown-freebsd13"
 
+def missing_tools():
+    missing = [str(pathlib.Path(LLVM, tool)) for tool in ("clang", "clang++", "llvm-nm", "llvm-objcopy")
+               if not pathlib.Path(LLVM, tool).is_file() or not os.access(pathlib.Path(LLVM, tool), os.X_OK)]
+    if shutil.which("ld.lld") is None:
+        missing.append("ld.lld on PATH")
+    return missing
+
 def available():
-    return all(pathlib.Path(LLVM, tool).exists() for tool in ("clang++", "llvm-nm", "llvm-objcopy")) and shutil.which("ld.lld") is not None
+    return not missing_tools()
 
 def compile(source, obj, pic=False, extra=()):
     subprocess.run([f"{LLVM}/clang++", TARGET, "-fPIC" if pic else "-fPIE", "-O1", "-fexceptions", "-fno-stack-protector",

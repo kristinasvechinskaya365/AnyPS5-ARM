@@ -821,10 +821,20 @@ if(BUILD_TESTING)
         set_tests_properties(needed_libraries PROPERTIES TIMEOUT 30)
         add_test(NAME macos_output COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_output.py $<TARGET_FILE:relinker>)
-        if(APPLE)
-            # Runs the relinked programs, so it needs the patched libraries: build the libs target first.
-            add_test(NAME macos_fixtures COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/macos/run_macos_fixtures.py $<TARGET_FILE:relinker> ${CMAKE_BINARY_DIR}/core/libs/libs)
+        add_test(NAME macos_fixture_contract COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_fixture_contract.py $<TARGET_FILE:relinker>)
+        set_tests_properties(macos_fixture_contract PROPERTIES TIMEOUT 30)
+        if(APPLE AND NOT ANYPS5_RELINKER_ONLY)
+            foreach(macosFixture IN ITEMS argv import tls exception c-cleanup threads module tls-modules intel intel-unconverted)
+                string(REPLACE "-" "_" macosFixtureName ${macosFixture})
+                set(macosFixtureTest macos_fixtures_${macosFixtureName})
+                add_test(NAME ${macosFixtureTest} COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/macos/run_macos_fixtures.py $<TARGET_FILE:relinker>
+                    ${CMAKE_BINARY_DIR}/core/libs/libs ${CMAKE_CURRENT_BINARY_DIR}/macos-fixtures --case ${macosFixture})
+                set_tests_properties(${macosFixtureTest} PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+            endforeach()
+            set_tests_properties(macos_fixtures_argv macos_fixtures_import macos_fixtures_tls PROPERTIES LABELS macos_fixture_required)
+            set_tests_properties(macos_fixtures_intel_unconverted PROPERTIES LABELS macos_fixture_fault_reference)
         endif()
         add_test(NAME macos_tls_overlap COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_tls_overlap.py $<TARGET_FILE:relinker>)

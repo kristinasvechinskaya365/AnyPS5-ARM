@@ -6,19 +6,61 @@ The argv, import and TLS programs are built byte by byte. The C++ exception, gue
 programs are compiled from the .cpp files here with LLVM (clang for x86_64-unknown-freebsd, llvm-nm,
 llvm-objcopy, ld.lld); they are skipped when that toolchain is missing. Each program reports its
 result through its exit status."""
-import pathlib, shutil, signal, subprocess, sys, tempfile
+import argparse
+from dataclasses import dataclass
+import os
+import pathlib
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
 import guesttools
+from argv_fixture import fixture as argv_fixture
 from import_fixture import fixture as import_fixture
+from signal_run import without_core_dump
 from tls_fixture import fixture as tls_fixture
-from test_linux_entry_argv import argv_fixture
 
 
-def relink_and_run(relinker, libraries, directory, expected, arguments=(), modules=False, relink_options=()):
+SKIP = 77
+RELINK_TIMEOUT = 10
+RUN_TIMEOUT = 5
+
+
+@dataclass(frozen=True)
+class Fixture:
+    build: object
+    runs: tuple
+    modules: bool = False
+    relink_options: tuple = ()
+    compiler: bool = False
+    fault: bool = False
+
+
+def run_command(command, directory, name, timeout):
+    with (directory / f"{name}.stdout.log").open("wb") as stdout, (directory / f"{name}.stderr.log").open("wb") as stderr:
+        process = subprocess.Popen(command, cwd=directory, stdout=stdout, stderr=stderr,
+                                   start_new_session=True, preexec_fn=without_core_dump)
+        try:
+            return process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"{name} timed out after {timeout} s; process group {process.pid} did not stop after SIGKILL") from None
+            raise RuntimeError(f"{name} timed out after {timeout} s") from None
+
+
+def relink_and_run(relinker, libraries, directory, case):
     directory = pathlib.Path(directory)
     output = directory / "eboot"
     source = directory / "eboot.elf"
@@ -30,15 +72,23 @@ def relink_and_run(relinker, libraries, directory, expected, arguments=(), modul
         shutil.move(str(source), str(staged / "eboot.elf"))
         shutil.move(str(directory / "sce_module"), str(staged / "sce_module"))
         source = staged / "eboot.elf"
-    options = [*relink_options] + ([] if modules else ["--skip-sce-module"])
-    relinked = subprocess.run([relinker, "--macos", *options, str(source), str(output)], capture_output=True, text=True, timeout=120)
-    if relinked.returncode != 0:
-        return f"relink failed: {relinked.stderr.strip()}"
+    options = [*case.relink_options] + ([] if case.modules else ["--skip-sce-module"])
+    code = run_command([str(relinker), "--macos", *options, str(source), str(output)], directory, "relink", RELINK_TIMEOUT)
+    if code != 0:
+        return f"relink failed with exit {code}: {(directory / 'relink.stderr.log').read_text(errors='replace').strip()}"
     output.chmod(0o755)
     shutil.rmtree(directory / "libs", ignore_errors=True)
-    shutil.copytree(libraries, directory / "libs", ignore=shutil.ignore_patterns("unpatched", "implib"))
-    executed = subprocess.run([str(output), *arguments], capture_output=True, text=True, timeout=120, cwd=directory)
-    return None if executed.returncode == expected else f"exit {executed.returncode}, expected {expected}: {executed.stderr.strip()[-300:]}"
+    (directory / "libs").mkdir()
+    for library in pathlib.Path(libraries).iterdir():
+        if library.name in ("libc.prx", "libkernel.prx") or library.suffix == ".dylib":
+            shutil.copy2(library, directory / "libs" / library.name)
+    for number, (arguments, expected) in enumerate(case.runs, 1):
+        name = f"run{number}"
+        code = run_command([str(output), *arguments], directory, name, RUN_TIMEOUT)
+        if code != expected:
+            error = (directory / f"{name}.stderr.log").read_text(errors="replace").strip()
+            return f"arguments {list(arguments)!r}: exit {code}, expected {expected}: {error[-300:]}"
+    return None
 
 
 def compiled_exception(directory):
@@ -196,52 +246,82 @@ def stale_libraries(libraries):
     """Patched libraries older than their unpatched build: `ninja libs` was not run after a change."""
     libraries = pathlib.Path(libraries)
     stale = []
-    for unpatched in sorted((libraries / "unpatched").glob("*.prx")):
+    for unpatched in (libraries / "unpatched" / name for name in ("libc.prx", "libkernel.prx")):
+        if not unpatched.is_file():
+            continue
         patched = libraries / unpatched.name
         if not patched.exists() or patched.stat().st_mtime < unpatched.stat().st_mtime:
             stale.append(unpatched.name)
     return stale
 
 
-def main():
+def fixture_cases():
+    return {
+        "argv": Fixture(lambda d: (d / "eboot.elf").write_bytes(argv_fixture()),
+                        ((("Z",), 0), ((), 1), (("Z", "extra"), 1), (("Y",), 1), (("ZZ",), 1))),
+        "import": Fixture(lambda d: (d / "eboot.elf").write_bytes(import_fixture()), (((), 0),)),
+        "tls": Fixture(lambda d: (d / "eboot.elf").write_bytes(tls_fixture()), (((), 136),)),
+        "exception": Fixture(compiled_exception, (((), 43),), compiler=True),
+        "c-cleanup": Fixture(compiled_c_cleanup, (((), 47),), compiler=True),
+        "threads": Fixture(compiled_threads, (((), 51),), compiler=True),
+        "module": Fixture(compiled_module, (((), 143),), modules=True, compiler=True),
+        "tls-modules": Fixture(compiled_tls_modules, (((), 47),), modules=True, compiler=True),
+        "intel": Fixture(compiled_intel, (((), 47),), modules=True, relink_options=("--to-rosetta",), compiler=True),
+        "intel-unconverted": Fixture(compiled_intel, (((), -signal.SIGILL),), modules=True, compiler=True, fault=True),
+    }
+
+
+def main(argv=None):
+    cases = fixture_cases()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("relinker", type=pathlib.Path)
+    parser.add_argument("libraries", type=pathlib.Path)
+    parser.add_argument("work", nargs="?", type=pathlib.Path)
+    parser.add_argument("--case", choices=cases)
+    parser.add_argument("--include-faults", action="store_true")
+    args = parser.parse_args(argv)
     if sys.platform != "darwin":
-        print("macOS fixtures skipped: not macOS")
-        return
-    relinker, libraries = sys.argv[1], sys.argv[2]
-    if stale := stale_libraries(libraries):
-        raise SystemExit(f"patched libraries are older than their build, run `ninja libs`: {', '.join(stale[:5])}")
-    temporary = len(sys.argv) <= 3
-    work = pathlib.Path(sys.argv[3]) if not temporary else pathlib.Path(tempfile.mkdtemp(prefix="anyps5-macos-"))
-    cases = [
-        ("argv", lambda d: (d / "eboot.elf").write_bytes(argv_fixture()), -signal.SIGTRAP, ["Z"], False),
-        ("import", lambda d: (d / "eboot.elf").write_bytes(import_fixture()), 0, [], False),
-        ("tls", lambda d: (d / "eboot.elf").write_bytes(tls_fixture()), 136, [], False),
-    ]
-    if guesttools.available():
-        cases += [("exception", compiled_exception, 43, [], False),
-                  ("c-cleanup", compiled_c_cleanup, 47, [], False),
-                  ("threads", compiled_threads, 51, [], False),
-                  ("module", compiled_module, 143, [], True),
-                  ("tls-modules", compiled_tls_modules, 47, [], True),
-                  # Without --to-rosetta the AMD-only instructions fault under Rosetta; with it they run.
-                  ("intel-unconverted", compiled_intel, -signal.SIGILL, [], True),
-                  ("intel", compiled_intel, 47, [], True, ["--to-rosetta"])]
-    else:
-        print("compiled macOS fixtures skipped: LLVM clang/llvm-objcopy/ld.lld not found")
-    failures = 0
-    for name, build, expected, arguments, modules, *relink_options in cases:
+        print(f"SKIP {args.case or 'macos-fixtures'}: execution requires macOS")
+        return SKIP
+    selected = {args.case: cases[args.case]} if args.case else cases
+    temporary = args.work is None
+    work = args.work.resolve() if args.work else pathlib.Path(tempfile.mkdtemp(prefix="anyps5-macos-"))
+    relinker, libraries = args.relinker.resolve(), args.libraries.resolve()
+    failures, passed, skipped = 0, 0, 0
+    for name, case in selected.items():
+        reason = None
+        if case.fault and not (args.include_faults or os.environ.get("ANYPS5_MACOS_FAULT_REFERENCE") == "1"):
+            reason = "intentional SIGILL reference is opt-in; use --include-faults or ANYPS5_MACOS_FAULT_REFERENCE=1"
+        elif case.compiler and (missing := guesttools.missing_tools()):
+            reason = f"guest LLVM toolchain missing: {', '.join(missing)}"
+        if reason:
+            print(f"SKIP {name}: {reason}", flush=True)
+            skipped += 1
+            continue
         directory = work / name
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
-        build(directory)
-        error = relink_and_run(relinker, libraries, directory, expected, arguments, modules, *relink_options)
-        print(f"{'PASS' if error is None else 'FAIL'} {name}" + ("" if error is None else f": {error}"))
+        try:
+            missing = [name for name in ("libc.prx", "libkernel.prx") if not (libraries / name).is_file()]
+            if missing:
+                raise RuntimeError(f"patched runtime libraries missing: {', '.join(missing)}; build macos_fixture_libraries")
+            if stale := stale_libraries(libraries):
+                raise RuntimeError(f"patched libraries are older than their build: {', '.join(stale)}; build macos_fixture_libraries")
+            case.build(directory)
+            error = relink_and_run(relinker, libraries, directory, case)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as failure:
+            error = str(failure)
+        print(f"{'PASS' if error is None else 'FAIL'} {name}" + ("" if error is None else f": {error}"), flush=True)
         failures += error is not None
+        passed += error is None
+    print(f"macOS fixtures: {passed} passed, {failures} failed, {skipped} skipped", flush=True)
     if failures:
-        raise SystemExit(f"{failures} macOS fixture(s) failed; their files are in {work}")
+        print(f"fixture files and logs retained in {work}", flush=True)
+        return 1
     if temporary:
         shutil.rmtree(work, ignore_errors=True)
+    return 0 if passed else SKIP
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
