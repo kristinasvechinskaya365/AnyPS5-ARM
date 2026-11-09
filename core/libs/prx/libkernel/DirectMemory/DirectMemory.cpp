@@ -1214,18 +1214,19 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     GuestAllocations::Mutation mutation;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+    const int nativeProtection = LinuxProtFromSce(prot);
     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, alignment, physStart)) {
         EraseReservations(*addr, len);
         RecordProtection(*addr, len, prot);
         return 0;
     }
-    ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
     RequireAliasesUnpinned(mutation, static_cast<std::uint64_t>(physStart), len);
+    ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
     std::lock_guard lock(g_directLock);
     ValidatePhysicalRange(static_cast<std::uint64_t>(physStart), len);
     void* mapped = MapAligned(*addr, len, PROT_NONE, flags, alignment);
     try {
-        AddMapping(reinterpret_cast<std::uintptr_t>(mapped), len, static_cast<std::uint64_t>(physStart), LinuxProtFromSce(prot));
+        AddMapping(reinterpret_cast<std::uintptr_t>(mapped), len, static_cast<std::uint64_t>(physStart), nativeProtection);
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0, (prot & GuestProtGpuReadWrite) != 0);
         if ((prot & GuestProtGpuReadWrite) != 0) mutation.NoteGpuMapping(mapped, len);
     } catch (...) {
@@ -1245,13 +1246,14 @@ static int MapAnonymous(void** addr, size_t len, int prot, int flags, size_t ali
     if (exclusive && mutation.Overlaps(*addr, len)) return SCE_KERNEL_ERROR_ENOMEM;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+    const int nativeProtection = LinuxProtFromSce(prot);
     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, alignment, -1, zero)) {
         EraseReservations(*addr, len);
         RecordProtection(*addr, len, prot);
         return 0;
     }
     ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
-    void* mapped = MapAligned(*addr, len, zero ? PROT_NONE : LinuxProtFromSce(prot), flags, alignment);
+    void* mapped = MapAligned(*addr, len, zero ? PROT_NONE : nativeProtection, flags, alignment);
     try {
 #ifdef _WIN32
         if (zero) GuestArena::GuestArenaMapZero_nid_postfix(mapped, len);

@@ -105,7 +105,7 @@ void RequirePreserved(const void* address, const Snapshot& before) {
 }
 
 enum class Operation { Direct, Flexible, Reserve };
-enum class Invalid { Flags, Alignment, AddressAlignment };
+enum class Invalid { Flags, Alignment, AddressAlignment, Protection };
 
 void CheckRejectedReplacement(Operation operation, Invalid invalid, bool overlap) {
     Allocation original(Page * 3);
@@ -128,10 +128,15 @@ void CheckRejectedReplacement(Operation operation, Invalid invalid, bool overlap
     const int flags = Fixed | (invalid == Invalid::Flags ? InvalidFlag : 0);
     const std::size_t alignment = invalid == Invalid::Alignment ? Page * 3 : invalid == Invalid::AddressAlignment ? Page * 2 : 0;
     void* address = mapped.Data(Page);
+    KernelBatchMapEntry entry{.start = address, .offset = static_cast<std::uint64_t>(replacement.Physical()), .length = Page * 2,
+                             .protection = 8, .type = 0, .reserved = 0, .operation = operation == Operation::Direct ? 0 : 3};
+    int processed = -1;
     bool rejected = false;
     try {
         int result = 0;
-        if (operation == Operation::Direct)
+        if (invalid == Invalid::Protection)
+            result = sceKernelBatchMap2(&entry, 1, &processed, flags);
+        else if (operation == Operation::Direct)
             result = sceKernelMapDirectMemory(&address, Page * 2, 3, flags, replacement.Physical(), alignment);
         else if (operation == Operation::Flexible)
             result = sceKernelMapFlexibleMemory(&address, Page * 2, 3, flags);
@@ -144,6 +149,8 @@ void CheckRejectedReplacement(Operation operation, Invalid invalid, bool overlap
     }
     Require(rejected, "invalid fixed request was accepted");
     Require(address == mapped.Data(Page), "rejected fixed request changed its output address");
+    if (invalid == Invalid::Protection)
+        Require(entry.start == mapped.Data(Page) && processed == -1, "rejected batch request changed its outputs");
     for (std::size_t page = 0; page < survivingPages; ++page) {
         RequirePreserved(mapped.Data(page * Page), before[page]);
         Require(mapped.Data(page * Page)[0] == 0x31 + page && mapped.Data(page * Page)[Page - 1] == 0x41 + page,
@@ -175,6 +182,10 @@ void CheckControls() {
             "no-overwrite did not reject a live mapping");
     Require(address == mapped.Data(), "no-overwrite changed its output address");
     RequirePreserved(mapped.Data(), before);
+    Require(sceKernelMapDirectMemory(&address, Page, 8, Fixed, allocation.Physical(), 0) == SCE_KERNEL_ERROR_EINVAL && address == mapped.Data(),
+            "direct map wrapper did not reject undefined protection");
+    Require(sceKernelMapFlexibleMemory(&address, Page, 8, Fixed) == SCE_KERNEL_ERROR_EINVAL && address == mapped.Data(),
+            "flexible map wrapper did not reject undefined protection");
     const auto failed = reinterpret_cast<void*>(std::numeric_limits<std::uintptr_t>::max());
     Require(mmap_nid_postfix(mapped.Data() + 1, Page, 3, 0x1012, -1, 0) == failed && *__error_nid_postfix() == 22,
             "unaligned POSIX fixed map did not report EINVAL");
@@ -207,7 +218,11 @@ int main(int argc, char** argv) {
             CheckRejectedReplacement(Operation::Direct, Invalid::AddressAlignment, overlap);
         } else if (test == "flexible_flags_covered") CheckRejectedReplacement(Operation::Flexible, Invalid::Flags, false);
         else if (test == "flexible_flags_overlap") CheckRejectedReplacement(Operation::Flexible, Invalid::Flags, true);
-        else if (test == "reserve_alignment") {
+        else if (test == "direct_protection_overlap" || test == "flexible_protection_overlap") {
+            const auto operation = test == "direct_protection_overlap" ? Operation::Direct : Operation::Flexible;
+            CheckRejectedReplacement(operation, Invalid::Protection, false);
+            CheckRejectedReplacement(operation, Invalid::Protection, true);
+        } else if (test == "reserve_alignment") {
             CheckRejectedReplacement(Operation::Reserve, Invalid::Alignment, false);
             CheckRejectedReplacement(Operation::Reserve, Invalid::AddressAlignment, false);
         } else if (test == "controls") CheckControls();
