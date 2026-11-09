@@ -11,6 +11,7 @@ on:
       - tools/required_test_report.py
       - tools/tests/test_macos_toolkit.py
       - tools/tests/test_swift_package_resolve.py
+      - tools/tests/test_swift_cache_provision.py
   pull_request:
     paths:
       - .github/workflows/macos-delivery.yml
@@ -20,6 +21,7 @@ on:
       - tools/required_test_report.py
       - tools/tests/test_macos_toolkit.py
       - tools/tests/test_swift_package_resolve.py
+      - tools/tests/test_swift_cache_provision.py
   workflow_dispatch:
 
 permissions:
@@ -50,7 +52,7 @@ jobs:
       - name: Verify dependency acquisition recovery
         run: |
           mkdir -p diagnostics
-          python3 -m unittest tools.tests.test_swift_package_resolve -v 2>&1 | tee diagnostics/dependency-recovery-tests.log
+          python3 -m unittest tools.tests.test_swift_package_resolve tools.tests.test_swift_cache_provision -v 2>&1 | tee diagnostics/dependency-recovery-tests.log
       - name: Require baseline reproductions and every candidate toolkit test
         run: |
           mkdir -p diagnostics
@@ -153,10 +155,18 @@ jobs:
         run: |
           sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
           test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Provision verified archives in a private Swift cache
+        timeout-minutes: 18
+        run: |
+          cache="$(mktemp -d "$RUNNER_TEMP/swiftpm-cache.XXXXXX")"
+          printf 'SWIFT_PACKAGE_CACHE=%s\n' "$cache" >> "$GITHUB_ENV"
+          python3 tools/macos/provision_swift_cache.py --package-path tools/macos/launcher \
+            --cache-path "$cache" --diagnostics diagnostics/package-cache
       - name: Acquire pinned Swift dependencies before testing
         timeout-minutes: 18
         run: |
-          python3 tools/macos/resolve_packages.py --package-path tools/macos/launcher --diagnostics diagnostics/package-resolution
+          python3 tools/macos/resolve_packages.py --package-path tools/macos/launcher --diagnostics diagnostics/package-resolution \
+            --cache-path "$SWIFT_PACKAGE_CACHE"
           git diff --exit-code -- tools/macos/launcher/Package.swift tools/macos/launcher/Package.resolved
       - name: Reproduce placement failures with the unchanged installer
         run: |
@@ -172,6 +182,7 @@ jobs:
           from tools.required_test_report import inventory, report, swift_outcomes
 
           package = Path("tools/macos/launcher")
+          cache = os.environ["SWIFT_PACKAGE_CACHE"]
           production = package / "Sources/AnyPS5Core/Installer.swift"
           fixture = package / "Tests/AnyPS5CoreTests/PlaceTests.swift"
           baseline = os.environ["PLACEMENT_BASELINE_REVISION"]
@@ -224,10 +235,10 @@ jobs:
               production.write_bytes(previous)
               if production.read_bytes() != previous or candidate == previous:
                   raise SystemExit("the placement comparison requires distinct unchanged and repaired implementations")
-              if run(["swift", "test", "--package-path", str(package), "--jobs", "2", "list"],
+              if run(["swift", "test", "--package-path", str(package), "--cache-path", cache, "--jobs", "2", "list"],
                      "diagnostics/placement-baseline-inventory.txt", 1800) != 0:
                   raise SystemExit("the unchanged installer must build with the identical fixture")
-              code = run(["swift", "test", "--package-path", str(package), "--skip-build", "--verbose",
+              code = run(["swift", "test", "--package-path", str(package), "--cache-path", cache, "--skip-build", "--verbose",
                           "--parallel", "--num-workers", "1", "--filter", r"^AnyPS5CoreTests\.PlaceTests/",
                           "--xunit-output", str(Path("diagnostics/placement-baseline.xml").resolve())],
                          "diagnostics/placement-baseline.log", 120)
@@ -272,13 +283,13 @@ jobs:
           git diff --exit-code -- tools/macos/launcher/Sources/AnyPS5Core/Installer.swift
       - name: Build the command-line installer and discover every Swift test
         run: |
-          swift build --package-path tools/macos/launcher --product anyps5-tool --jobs 2 2>&1 | tee diagnostics/swift-build.log
+          swift build --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --product anyps5-tool --jobs 2 2>&1 | tee diagnostics/swift-build.log
           lipo tools/macos/launcher/.build/debug/anyps5-tool -verify_arch arm64
-          swift test --package-path tools/macos/launcher --jobs 2 list > diagnostics/swift-inventory.txt 2> diagnostics/swift-discovery.log
+          swift test --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --jobs 2 list > diagnostics/swift-inventory.txt 2> diagnostics/swift-discovery.log
       - name: Execute required engine installation and update suites
         run: |
           filter="^AnyPS5CoreTests\.(${REQUIRED_SWIFT_SUITES// /|})/"
-          swift test --package-path tools/macos/launcher --skip-build --verbose --parallel --num-workers 2 \
+          swift test --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --skip-build --verbose --parallel --num-workers 2 \
             --filter "$filter" --skip '^AnyPS5CoreTests\.EngineCheckoutTests/testAnEngineFromARealCheckoutsBuild$' \
             --xunit-output "$PWD/diagnostics/swift.xml" 2>&1 | tee diagnostics/swift-tests.log
       - name: Require every discovered case in every selected suite
@@ -300,11 +311,11 @@ jobs:
           PY
       - name: Build both release architectures of the launcher and installer
         run: |
-          swift build --package-path tools/macos/launcher -c release --arch arm64 --arch x86_64 --product AnyPS5 --jobs 2 \
+          swift build --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" -c release --arch arm64 --arch x86_64 --product AnyPS5 --jobs 2 \
             2>&1 | tee diagnostics/universal-launcher-build.log
-          swift build --package-path tools/macos/launcher -c release --arch arm64 --arch x86_64 --product anyps5-tool --jobs 2 \
+          swift build --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" -c release --arch arm64 --arch x86_64 --product anyps5-tool --jobs 2 \
             2>&1 | tee diagnostics/universal-tool-build.log
-          products="$(swift build --package-path tools/macos/launcher -c release --arch arm64 --arch x86_64 --show-bin-path)"
+          products="$(swift build --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" -c release --arch arm64 --arch x86_64 --show-bin-path)"
           printf '%s\n' "$products" > diagnostics/products-path.txt
           for binary in AnyPS5 anyps5-tool; do
             test -x "$products/$binary"

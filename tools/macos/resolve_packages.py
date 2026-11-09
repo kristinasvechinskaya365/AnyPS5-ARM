@@ -25,11 +25,14 @@ def transient_download_failure(output):
     return bool(errors) and all(TRANSIENT_DOWNLOAD.fullmatch(line) for line in errors)
 
 
-def resolve_packages(package, diagnostics, timeout=300):
+def resolve_packages(package, diagnostics, timeout=300, cache_path=None):
     package = Path(package).resolve()
     diagnostics = Path(diagnostics).resolve()
     diagnostics.mkdir(parents=True, exist_ok=True)
-    command = ["swift", "package", "--package-path", str(package), "--force-resolved-versions", "resolve"]
+    command = ["swift", "package", "--package-path", str(package)]
+    if cache_path is not None:
+        command.extend(["--cache-path", str(Path(cache_path).resolve())])
+    command.extend(["--force-resolved-versions", "resolve"])
     data = {"schema": 1, "command": command, "inputs": {}, "attempts": [], "passed": False}
     try:
         try:
@@ -96,8 +99,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--package-path", type=Path, required=True)
     parser.add_argument("--diagnostics", type=Path, required=True)
+    parser.add_argument("--cache-path", type=Path)
     args = parser.parse_args()
-    return resolve_packages(args.package_path, args.diagnostics)
+    return resolve_packages(args.package_path, args.diagnostics, cache_path=args.cache_path)
 
 
 if __name__ == "__main__":

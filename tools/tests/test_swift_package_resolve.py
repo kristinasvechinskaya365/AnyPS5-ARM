@@ -64,10 +64,10 @@ class SwiftPackageResolveTests(unittest.TestCase):
         return (f"error: failed downloading 'https://example.invalid/{target}.zip' which is required by "
                 f"binary target '{target}': badResponseStatusCode({status})\n")
 
-    def run_resolve(self, responses, timeout=3):
+    def run_resolve(self, responses, timeout=3, cache_path=None):
         (self.root / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
-            code = resolver.resolve_packages(self.package, self.diagnostics, timeout=timeout)
+            code = resolver.resolve_packages(self.package, self.diagnostics, timeout=timeout, cache_path=cache_path)
         data = json.loads((self.diagnostics / "report.json").read_text())
         calls = self.root / "calls.jsonl"
         invoked = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
@@ -95,6 +95,14 @@ class SwiftPackageResolveTests(unittest.TestCase):
         self.assertEqual([entry["transient_download_failure"] for entry in data["attempts"]], [True, True, False])
         self.assertEqual([Path(entry["log"]).read_text() for entry in data["attempts"]], [first, second, "Resolved\n"])
         self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [10, 30])
+
+    def test_private_cache_path_is_forwarded_without_changing_resolution(self):
+        cache = self.root / "private cache"
+        code, data, calls = self.run_resolve([{}], cache_path=cache)
+        self.assertEqual(code, 0)
+        self.assertTrue(data["passed"])
+        self.assertEqual(calls, [["package", "--package-path", str(self.package), "--cache-path", str(cache),
+                                  "--force-resolved-versions", "resolve"]])
 
     def test_exhaustion_stays_failed_and_does_not_attempt_a_fourth_time(self):
         code, data, calls = self.run_resolve([{"exit": 1, "output": self.download_error()}] * 3 + [{}])

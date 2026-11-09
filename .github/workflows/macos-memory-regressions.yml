@@ -20,6 +20,8 @@ on:
       - core/libs/prx/libSceAgcDriver/**
       - core/shader/recompiler/**
       - tools/required_test_report.py
+      - tools/macos/fetch_ffmpeg.py
+      - tools/tests/test_ffmpeg_fetch.py
   workflow_dispatch:
 
 permissions:
@@ -74,6 +76,11 @@ jobs:
           brew install ninja 2>&1 | tee diagnostics/ninja.log
           arch -x86_64 uname -m | tee diagnostics/rosetta-architecture.txt
           test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Acquire and verify the pinned FFmpeg package
+        timeout-minutes: 6
+        run: |
+          python3 tools/macos/fetch_ffmpeg.py --repo . --architecture x64 \
+            --destination "$RUNNER_TEMP/ffmpeg-x64" --report diagnostics/ffmpeg-acquisition.json
       - name: Prepare the unchanged baseline with the identical file-mapping fixture
         run: |
           git worktree add --detach "$RUNNER_TEMP/file-memory-baseline" "$BASELINE_REVISION"
@@ -136,7 +143,9 @@ jobs:
           baseline="$RUNNER_TEMP/file-memory-baseline"
           cmake -S "$baseline" -B "$baseline/build-memory" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DFFMPEG_PREBUILT_DIR:PATH="$RUNNER_TEMP/ffmpeg-x64" \
             -DPython3_EXECUTABLE="$(command -v python3)" 2>&1 | tee diagnostics/baseline-configure.log
+          grep -Fx "FFMPEG_PREBUILT_DIR:PATH=$RUNNER_TEMP/ffmpeg-x64" "$baseline/build-memory/CMakeCache.txt"
           cmake --build "$baseline/build-memory" --parallel 2 --target guest_file_mapping_validation_tests \
             2>&1 | tee diagnostics/baseline-build.log
           file "$baseline/build-memory/tests/guest_file_mapping_validation_tests" > diagnostics/baseline-binary.txt
@@ -196,7 +205,9 @@ jobs:
         run: |
           cmake -S . -B build-memory -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DFFMPEG_PREBUILT_DIR:PATH="$RUNNER_TEMP/ffmpeg-x64" \
             -DPython3_EXECUTABLE="$(command -v python3)" 2>&1 | tee diagnostics/configure.log
+          grep -Fx "FFMPEG_PREBUILT_DIR:PATH=$RUNNER_TEMP/ffmpeg-x64" build-memory/CMakeCache.txt
           ctest --test-dir build-memory --show-only=json-v1 --no-tests=error > diagnostics/inventory.json
       - name: Build the required memory fixtures
         run: |
