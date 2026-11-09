@@ -108,8 +108,7 @@ class FixtureRunnerTests(unittest.TestCase):
         self.assertIn("0 passed, 0 failed, 1 skipped", self.output.getvalue())
 
     def test_fault_reference_needs_opt_in(self):
-        with patch.dict(os.environ, {"ANYPS5_MACOS_FAULT_REFERENCE": "0"}):
-            self.assertEqual(self.run_case("intel-unconverted"), fixtures.SKIP)
+        self.assertEqual(self.run_case("intel-unconverted"), fixtures.SKIP)
         self.assertIn("SKIP intel-unconverted: intentional SIGILL reference is opt-in", self.output.getvalue())
         self.output.seek(0)
         self.output.truncate()

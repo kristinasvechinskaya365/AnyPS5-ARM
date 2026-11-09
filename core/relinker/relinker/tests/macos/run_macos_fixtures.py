@@ -290,8 +290,8 @@ def main(argv=None):
     failures, passed, skipped = 0, 0, 0
     for name, case in selected.items():
         reason = None
-        if case.fault and not (args.include_faults or os.environ.get("ANYPS5_MACOS_FAULT_REFERENCE") == "1"):
-            reason = "intentional SIGILL reference is opt-in; use --include-faults or ANYPS5_MACOS_FAULT_REFERENCE=1"
+        if case.fault and not args.include_faults:
+            reason = "intentional SIGILL reference is opt-in; use --include-faults"
         elif case.compiler and (missing := guesttools.missing_tools()):
             reason = f"guest LLVM toolchain missing: {', '.join(missing)}"
         if reason:
