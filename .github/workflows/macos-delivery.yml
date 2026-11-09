@@ -158,6 +158,10 @@ jobs:
       - name: Provision verified archives in a private Swift cache
         timeout-minutes: 18
         run: |
+          {
+            command -v curl
+            curl --version
+          } > diagnostics/curl-version.txt
           cache="$(mktemp -d "$RUNNER_TEMP/swiftpm-cache.XXXXXX")"
           printf 'SWIFT_PACKAGE_CACHE=%s\n' "$cache" >> "$GITHUB_ENV"
           python3 tools/macos/provision_swift_cache.py --package-path tools/macos/launcher \

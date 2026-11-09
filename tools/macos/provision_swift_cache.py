@@ -1,4 +1,5 @@
 import argparse
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 from pathlib import Path
@@ -66,23 +67,81 @@ def verified_file(path, asset):
         raise ValueError("archive SHA-256 differs from the pinned manifest")
 
 
+def response_metadata(path):
+    responses = []
+    with path.open("rb") as stream:
+        contents = stream.read(65536)
+    for line in contents.decode("iso-8859-1").splitlines():
+        status = re.fullmatch(r"HTTP/\S+ (\d{3})(?: .*)?", line)
+        if status:
+            responses.append({"status": int(status[1])})
+            continue
+        if not responses or ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        name, value = name.lower(), value.strip()
+        if name in ("x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "retry-after") and \
+                re.fullmatch(r"[0-9]{1,20}", value):
+            responses[-1][name] = int(value)
+        elif name in ("x-ratelimit-resource", "x-github-request-id", "server") and \
+                re.fullmatch(r"[A-Za-z0-9._:/() -]{1,128}", value):
+            responses[-1][name] = value
+        elif name in ("date", "retry-after"):
+            try:
+                responses[-1][name] = parsedate_to_datetime(value).isoformat()
+            except (ValueError, TypeError, OverflowError):
+                pass
+        elif name == "content-type":
+            media_type = value.split(";", 1)[0].strip().lower()
+            if re.fullmatch(r"[a-z0-9.+_-]+/[a-z0-9.+_-]+", media_type):
+                responses[-1][name] = media_type
+    return responses
+
+
+def error_message(path):
+    try:
+        with path.open("rb") as stream:
+            message = json.loads(stream.read(16384)).get("message")
+        if not isinstance(message, str):
+            return None
+        message = " ".join(message.split())
+        message = re.sub(r"https?://\S+", "[URL omitted]", message, flags=re.I)
+        message = re.sub(r"[?&]\S+", "[query omitted]", message)
+        message = re.sub(r"\b(?:authorization|set-cookie|cookie|location|signature|token|sig)(?:\s*[:=]|\s+).*",
+                         "[sensitive field omitted]", message, flags=re.I)
+        return message[:512]
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return None
+
+
 def download(asset, destination, attempts, save, timeout):
     for number in range(1, 4):
-        attempt = {"number": number, "url": asset["api_url"], "accept": "application/octet-stream",
+        route = "release" if number == 1 else "asset-api"
+        url = asset["url"] if number == 1 else asset["api_url"]
+        attempt = {"number": number, "route": route, "url": url,
+                   "accept": "application/octet-stream" if route == "asset-api" else None,
                    "http_status": None, "exit_code": None, "timed_out": False}
         attempts.append(attempt)
         save()
-        command = ["curl", "--location", "--fail", "--silent", "--show-error", "--proto", "=https",
+        with tempfile.NamedTemporaryFile(prefix=".headers-", dir=destination.parent, delete=False) as stream:
+            headers = Path(stream.name)
+        command = ["curl", "--location", "--fail-with-body", "--silent", "--show-error", "--proto", "=https",
                    "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "90",
-                   "--max-filesize", str(asset["size"]), "--header", "Accept: application/octet-stream",
-                   "--output", str(destination), "--write-out", "%{http_code}\n%{content_type}\n%{size_download}\n",
-                   asset["api_url"]]
+                   "--max-filesize", str(asset["size"]),
+                   "--output", str(destination), "--dump-header", str(headers),
+                   "--write-out", "%{http_code}\n%{content_type}\n%{size_download}\n"]
+        if route == "asset-api":
+            command.extend(["--header", "Accept: application/octet-stream"])
+        command.append(url)
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             attempt["timed_out"] = True
-            save()
             raise ValueError("archive acquisition exceeded its process time budget") from None
+        finally:
+            attempt["responses"] = response_metadata(headers)
+            headers.unlink(missing_ok=True)
+            save()
         attempt["exit_code"] = result.returncode
         fields = result.stdout.splitlines()
         if len(fields) != 3 or not re.fullmatch(r"\d{3}", fields[0]) or not fields[2].isdigit():
@@ -91,16 +150,20 @@ def download(asset, destination, attempts, save, timeout):
         attempt["bytes"] = int(fields[2])
         media_type = fields[1].split(";", 1)[0].strip().lower()
         attempt["json_response"] = media_type == "application/json" or media_type.endswith("+json")
+        if attempt["http_status"] >= 400 and attempt["json_response"]:
+            message = error_message(destination)
+            if message:
+                attempt["message"] = message
         save()
         if result.returncode == 0:
             if attempt["http_status"] != 200 or attempt["json_response"]:
-                raise ValueError("GitHub asset API did not return the pinned archive")
+                raise ValueError("GitHub did not return the pinned archive")
             verified_file(destination, asset)
             attempt["sha256"] = asset["sha256"]
             save()
             return
-        transient = (result.returncode == 22 and attempt["http_status"] in (502, 503, 504)) or \
-            result.returncode in (6, 7, 28, 52, 56)
+        transient = (result.returncode in (22, 56) and attempt["http_status"] in (502, 503, 504)) or \
+            (attempt["http_status"] < 400 and result.returncode in (6, 7, 28, 52, 56))
         attempt["transient"] = transient
         if not transient or number == 3:
             raise ValueError("archive acquisition failed; see the structured HTTP diagnostics")

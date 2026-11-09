@@ -50,6 +50,9 @@ class SwiftCacheProvisionTests(unittest.TestCase):
             response = json.loads((root / "responses.json").read_text())[index]
             destination = Path(sys.argv[sys.argv.index("--output") + 1])
             destination.write_bytes(bytes.fromhex(response.get("payload", "")))
+            if "--dump-header" in sys.argv:
+                headers = Path(sys.argv[sys.argv.index("--dump-header") + 1])
+                headers.write_text(response.get("headers", ""))
             if response.get("change_pins"):
                 (root / "package with spaces/Package.resolved").write_text("changed pins")
             print(response.get("status", "200"))
@@ -98,8 +101,8 @@ class SwiftCacheProvisionTests(unittest.TestCase):
             self.assertTrue(entry["verified"])
             self.assertFalse(entry["reused"])
             self.assertEqual(Path(entry["path"]).read_bytes(), payload)
-            self.assertEqual(call[-1], asset["api_url"])
-            self.assertEqual(call[call.index("--header") + 1], "Accept: application/octet-stream")
+            self.assertEqual(call[-1], asset["url"])
+            self.assertNotIn("--header", call)
             self.assertEqual(call[call.index("--proto") + 1], "=https")
             self.assertEqual(call[call.index("--proto-redir") + 1], "=https")
             self.assertEqual(call[call.index("--max-filesize") + 1], str(asset["size"]))
@@ -150,12 +153,15 @@ class SwiftCacheProvisionTests(unittest.TestCase):
                 self.assertEqual(list((self.cache / "artifacts").iterdir()), [])
                 self.sleep.assert_not_called()
 
-    def test_transient_api_failure_retries_only_the_same_immutable_asset(self):
+    def test_transient_release_failure_uses_only_the_pinned_asset_api(self):
         responses = [{"exit": 22, "status": "504"}] + [{"payload": payload.hex()} for payload in self.payloads]
         code, report, calls, _ = self.run_provision(responses)
         self.assertEqual(code, 0, report)
         self.assertEqual(len(calls), 4)
-        self.assertEqual(calls[0][-1], calls[1][-1])
+        self.assertEqual(calls[0][-1], self.assets[0]["url"])
+        self.assertEqual(calls[1][-1], self.assets[0]["api_url"])
+        self.assertEqual(calls[1][calls[1].index("--header") + 1], "Accept: application/octet-stream")
+        self.assertEqual([a["route"] for a in report["assets"][0]["attempts"]], ["release", "asset-api"])
         self.assertEqual([a["http_status"] for a in report["assets"][0]["attempts"]], [504, 200])
         self.sleep.assert_called_once_with(2)
 
@@ -175,6 +181,84 @@ class SwiftCacheProvisionTests(unittest.TestCase):
         self.assertNotIn("private-value", output)
         self.assertNotIn("private-value", json.dumps(report))
         self.sleep.assert_not_called()
+
+    def test_http_rejection_wins_over_a_transport_error(self):
+        for status in ("401", "403", "404", "500"):
+            with self.subTest(status=status):
+                (self.root / "calls.jsonl").unlink(missing_ok=True)
+                code, report, calls, _ = self.run_provision([{"exit": 56, "status": status, "type": "application/json"}] * 3)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(calls), 1)
+                self.assertFalse(report["assets"][0]["attempts"][0]["transient"])
+                self.assertEqual(list((self.cache / "artifacts").iterdir()), [])
+                self.sleep.assert_not_called()
+
+    def test_transient_status_or_incomplete_transport_can_retry(self):
+        for status in ("000", "200", "504"):
+            with self.subTest(status=status):
+                self.cache = self.root / ("cache-" + status)
+                self.sleep.reset_mock()
+                (self.root / "calls.jsonl").unlink(missing_ok=True)
+                responses = [{"exit": 56, "status": status}] + [{"payload": payload.hex()} for payload in self.payloads]
+                code, report, calls, _ = self.run_provision(responses)
+                self.assertEqual(code, 0, report)
+                self.assertEqual(len(calls), 4)
+                self.assertTrue(report["assets"][0]["attempts"][0]["transient"])
+                self.sleep.assert_called_once_with(2)
+
+    def test_api_rejection_stops_after_a_transient_release_failure(self):
+        code, report, calls, _ = self.run_provision([{"exit": 22, "status": "504"},
+                                                    {"exit": 56, "status": "403", "type": "application/json"}, {}])
+        self.assertEqual(code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual([call[-1] for call in calls], [self.assets[0]["url"], self.assets[0]["api_url"]])
+        self.assertFalse(report["assets"][0]["attempts"][1]["transient"])
+        self.sleep.assert_called_once_with(2)
+
+    def test_rate_limit_diagnostics_keep_only_safe_response_fields(self):
+        headers = ("HTTP/2 403\r\nContent-Type: application/json; charset=utf-8\r\n"
+                   "X-RateLimit-Limit: 60\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1804749000\r\n"
+                   "X-RateLimit-Resource: core\r\nRetry-After: 30\r\nX-GitHub-Request-Id: ABCD:1234\r\n"
+                   "Server: github.com\r\nDate: Mon, 09 Nov 2026 06:00:00 GMT\r\n"
+                   "Location: https://release-assets.githubusercontent.com/a?signature=private-value\r\n"
+                   "Set-Cookie: private-cookie\r\nAuthorization: Bearer private-token\r\n")
+        body = json.dumps({"message": "API rate limit exceeded. See https://example.invalid/help?token=private-value"}).encode()
+        code, report, calls, output = self.run_provision([{"exit": 56, "status": "403", "type": "application/json",
+                                                         "payload": body.hex(), "headers": headers}])
+        self.assertEqual(code, 1)
+        attempt = report["assets"][0]["attempts"][0]
+        self.assertEqual(attempt["message"], "API rate limit exceeded. See [URL omitted]")
+        self.assertEqual(attempt["responses"], [{"status": 403, "content-type": "application/json",
+                                                "x-ratelimit-limit": 60, "x-ratelimit-remaining": 0,
+                                                "x-ratelimit-reset": 1804749000, "x-ratelimit-resource": "core",
+                                                "retry-after": 30, "x-github-request-id": "ABCD:1234",
+                                                "server": "github.com", "date": "2026-11-09T06:00:00+00:00"}])
+        self.assertNotIn("private-", output)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(Path(calls[0][calls[0].index("--dump-header") + 1]).exists())
+        self.assertEqual(list((self.cache / "artifacts").iterdir()), [])
+
+    def test_malformed_error_body_and_sensitive_header_values_are_omitted(self):
+        headers = ("HTTP/2 403\r\nX-RateLimit-Remaining: https://example.invalid/?secret=value\r\n"
+                   "Server: https://example.invalid/?secret=value\r\nDate: invalid-date\r\n")
+        code, report, _, output = self.run_provision([{"exit": 56, "status": "403", "type": "application/json",
+                                                     "payload": b"not JSON".hex(), "headers": headers}])
+        self.assertEqual(code, 1)
+        self.assertEqual(report["assets"][0]["attempts"][0]["responses"], [{"status": 403}])
+        self.assertNotIn("message", report["assets"][0]["attempts"][0])
+        self.assertNotIn("secret", output)
+
+    def test_json_error_message_omits_authentication_and_cookie_values(self):
+        for message in ("Authorization: Bearer private-value", "Authorization Bearer private-value",
+                        "Set-Cookie: private-value", "Location https://example.invalid/?sig=private-value"):
+            with self.subTest(message=message):
+                (self.root / "calls.jsonl").unlink(missing_ok=True)
+                body = json.dumps({"message": message}).encode()
+                code, report, _, output = self.run_provision([{"exit": 56, "status": "403",
+                                                              "type": "application/json", "payload": body.hex()}])
+                self.assertEqual(code, 1)
+                self.assertEqual(report["assets"][0]["attempts"][0]["message"], "[sensitive field omitted]")
+                self.assertNotIn("private-value", output)
 
     def test_unsafe_cache_directories_and_linked_entries_are_rejected(self):
         outside = self.root / "outside"
