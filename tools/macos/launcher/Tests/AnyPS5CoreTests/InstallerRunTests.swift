@@ -75,10 +75,12 @@ final class InstallerRunTests: XCTestCase {
         let bundle = try install(game, toolkit, root)
         try executable(in: bundle)
         let cache = scratch.appendingPathComponent("isolated cache").path
+        let directory = try XCTUnwrap(realpath(bundle.appendingPathComponent("Contents/Resources/game").path, nil))
+        defer { free(directory) }
         let result = try run(bundle.appendingPathComponent("Contents/MacOS/run"), ["space and $literal"],
                              environment: ["ANYPS5_SHADER_CACHE_DIR": cache, "VK_DRIVER_FILES": "/custom/icd.json", "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS": "1"])
         XCTAssertEqual(result.code, 7)
-        XCTAssertEqual(result.stdout, "pid=\(result.pid)\ncwd=\(bundle.appendingPathComponent("Contents/Resources/game").resolvingSymlinksInPath().path)\nargument=space and $literal\ncache=\(cache)\ndriver=/custom/icd.json\nsubmits=1\n")
+        XCTAssertEqual(result.stdout, "pid=\(result.pid)\ncwd=\(String(cString: directory))\nargument=space and $literal\ncache=\(cache)\ndriver=/custom/icd.json\nsubmits=1\n")
         XCTAssertEqual(result.stderr, "raw stderr\n")
         XCTAssertFalse(fm.fileExists(atPath: scratch.appendingPathComponent("home/Library/Logs/AnyPS5/PPSA00001.log").path))
     }
