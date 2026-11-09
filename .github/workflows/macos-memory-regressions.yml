@@ -1,0 +1,115 @@
+name: macOS memory regressions
+
+on:
+  push:
+    branches: [main, 'codex/macos-*']
+    paths:
+      - .github/workflows/macos-memory-regressions.yml
+      - .github/anytogether-ci/ctest-known-failures.txt
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/libs/CMakeLists.txt
+      - core/libs/prx/libc/**
+      - core/libs/prx/libkernel/**
+      - core/libs/tests/GuestMemory*.cpp
+      - core/libs/tests/GuestDirectMemory*.cpp
+      - core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+      - core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp
+      - core/libs/prx/libSceAgcDriver/tests/WriteTracking.cpp
+      - core/libs/prx/libSceAgcDriver/tests/cmake/agc_write_tracking_tests.cmake
+      - tools/required_test_report.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-memory-regressions-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  memory-regressions:
+    name: Required macOS memory and CPU write-tracking tests
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      REQUIRED_TESTS: '^(guest_memory|guest_mmap_fixed_anonymous|guest_direct_memory_lifecycle|guest_direct_memory_for_app|agc_write_tracking|agc_write_tracking_generation_wrap)$'
+    steps:
+      - name: Check out tested revision and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Record source and machine identity
+        run: |
+          mkdir -p diagnostics
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            sw_vers
+            uname -a
+            sysctl hw.model hw.memsize hw.ncpu machdep.cpu.brand_string
+            xcodebuild -version
+            xcrun clang --version
+            cmake --version
+            python3 --version
+            printf 'Coverage: CPU memory mappings and AGC write tracking; no GPU execution\n'
+          } > diagnostics/identity.txt
+          cp .github/anytogether-ci/ctest-known-failures.txt diagnostics/known-failures.txt
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+      - name: Install Rosetta and Ninja
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          brew install ninja 2>&1 | tee diagnostics/ninja.log
+          arch -x86_64 uname -m | tee diagnostics/rosetta-architecture.txt
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Configure the x86-64 runtime and test inventory
+        run: |
+          cmake -S . -B build-memory -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DPython3_EXECUTABLE="$(command -v python3)" 2>&1 | tee diagnostics/configure.log
+          ctest --test-dir build-memory --show-only=json-v1 --no-tests=error > diagnostics/inventory.json
+      - name: Build the required memory fixtures
+        run: |
+          cmake --build build-memory --parallel 2 --target guest_memory_tests \
+            guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests \
+            agc_write_tracking_tests 2>&1 | tee diagnostics/build.log
+          for binary in guest_memory_tests guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests agc_write_tracking_tests; do
+            file "build-memory/tests/$binary"
+            lipo "build-memory/tests/$binary" -verify_arch x86_64
+            shasum -a 256 "build-memory/tests/$binary"
+          done > diagnostics/binaries.txt
+          shasum -a 256 build-memory/core/libs/libs/unpatched/libc.prx \
+            build-memory/core/libs/libs/unpatched/libkernel.prx > diagnostics/runtime-sha256.txt
+      - name: Execute the selected regressions without retries or exclusions
+        run: |
+          ctest --test-dir build-memory -R "$REQUIRED_TESTS" -V --timeout 30 --parallel 1 \
+            --no-tests=error --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Require every selected test to report a pass
+        if: always()
+        run: |
+          python3 tools/required_test_report.py --inventory diagnostics/inventory.json \
+            --junit diagnostics/ctest.xml --output diagnostics/report.json \
+            --require guest_memory --require guest_mmap_fixed_anonymous \
+            --require guest_direct_memory_lifecycle --require guest_direct_memory_for_app \
+            --require agc_write_tracking --require agc_write_tracking_generation_wrap
+      - name: Upload memory regression diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-memory-regressions-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/
+            build-memory/CMakeCache.txt
+            build-memory/CMakeFiles/CMakeConfigureLog.yaml
+            build-memory/Testing/Temporary/
+          retention-days: 7
+          if-no-files-found: error
