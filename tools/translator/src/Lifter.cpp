@@ -969,7 +969,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
             if (instruction.size == 0) throw Unsupported{"(undecodable)"};
             Emit(instruction);
             ++stats.instructions;
-            if (!builder.GetInsertBlock()->hasTerminator()) {
+            if (builder.GetInsertBlock()->getTerminator() == nullptr) {
                 if (const auto next = blocks.find(instruction.Next()); next != blocks.end()) builder.CreateBr(next->second);
                 else Trap(unsupportedRuntime, instruction.Next());
             }
