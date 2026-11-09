@@ -39,7 +39,6 @@ macos   agc_thread_priority_refused_rt  Expects a refused real-time priority req
 macos   agc_thread_priority_refused_high  Same as above, high priority.
 macos   agc_driver_pm4_priority_refused Same as above, for the PM4 queue priority.
 macos   agc_shared_write                Cannot inspect mapping lifetimes on macOS.
-macos   agc_write_tracking              Known macOS failure (also on the developers' Macs): a block outside the import window reads as written.
 macos   agc_submit_progress(_no_timeline)?  Needs a Vulkan device; the runner has no MoltenVK (also fails on the developers' Macs).
 macos   agc_driver_pipelined_prefetch   Known macOS failure: the AGC FS table cannot be mapped under Rosetta.
 macos   agc_driver_graphics             Known macOS hang: a failed map import is retried and the probe remap deadlocks on the imports mutex.

@@ -15,10 +15,8 @@ on:
       - core/libs/prx/libkernel/**
       - core/libs/tests/GuestMemory*.cpp
       - core/libs/tests/GuestDirectMemory*.cpp
-      - core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
-      - core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp
-      - core/libs/prx/libSceAgcDriver/tests/WriteTracking.cpp
-      - core/libs/prx/libSceAgcDriver/tests/cmake/agc_write_tracking_tests.cmake
+      - core/libs/prx/libSceAgcDriver/**
+      - core/shader/recompiler/**
       - tools/required_test_report.py
   workflow_dispatch:
 
@@ -39,12 +37,15 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 75
     env:
+      BASELINE_REVISION: 4200e985786e177698d518253a272786b6adfce2
       CMAKE_BUILD_PARALLEL_LEVEL: 2
-      REQUIRED_TESTS: '^(guest_memory|guest_mmap_fixed_anonymous|guest_direct_memory_lifecycle|guest_direct_memory_for_app|agc_write_tracking|agc_write_tracking_generation_wrap)$'
+      REQUIRED_TESTS: '^(guest_memory|guest_mmap_fixed_anonymous|guest_direct_memory_lifecycle|guest_direct_memory_for_app|guest_direct_memory_executable_(transition|aliases|partial_release|replacement|rejections)|agc_write_tracking|agc_write_tracking_generation_wrap)$'
     steps:
       - name: Check out tested revision and pinned submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
+          filter: blob:none
           submodules: recursive
           persist-credentials: false
       - name: Record source and machine identity
@@ -71,6 +72,109 @@ jobs:
           brew install ninja 2>&1 | tee diagnostics/ninja.log
           arch -x86_64 uname -m | tee diagnostics/rosetta-architecture.txt
           test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Prepare the unchanged baseline with the identical executable fixture
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/direct-memory-baseline" "$BASELINE_REVISION"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          candidate = Path.cwd()
+          baseline = Path(os.environ["RUNNER_TEMP"]) / "direct-memory-baseline"
+          revision = os.environ["BASELINE_REVISION"]
+          def git(*args, cwd=candidate):
+              return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          if git("rev-parse", "HEAD", cwd=baseline) != revision:
+              raise SystemExit("baseline worktree is not at the required revision")
+          for path in ("3rdparty", ".gitmodules"):
+              if git("rev-parse", f"{revision}:{path}") != git("rev-parse", f"HEAD:{path}"):
+                  raise SystemExit(f"baseline dependencies differ: {path}")
+          dependencies = {}
+          for entry in git("ls-tree", "-r", revision, "--", "3rdparty").splitlines():
+              metadata, path = entry.split("\t", 1)
+              mode, kind, sha = metadata.split()
+              if mode != "160000":
+                  continue
+              source = candidate / path
+              if kind != "commit" or git("rev-parse", "HEAD", cwd=source) != sha:
+                  raise SystemExit(f"candidate submodule is not at its pinned revision: {path}")
+              destination = baseline / path
+              if destination.exists():
+                  destination.rmdir()
+              destination.symlink_to(source, target_is_directory=True)
+              dependencies[path] = sha
+          if not dependencies:
+              raise SystemExit("no pinned submodules were verified")
+          fixture = "core/libs/tests/GuestDirectMemoryExecutable.cpp"
+          registration = "core/libs/prx/libkernel/CMakeLists.txt"
+          for path in (fixture, registration):
+              shutil.copy2(candidate / path, baseline / path)
+          production = "core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp"
+          if git("hash-object", production, cwd=baseline) != git("rev-parse", f"{revision}:{production}"):
+              raise SystemExit("baseline direct-memory implementation was modified")
+          data = {"baseline_revision": revision, "candidate_revision": os.environ["GITHUB_SHA"],
+                  "fixture_sha256": digest(candidate / fixture),
+                  "baseline_fixture_sha256": digest(baseline / fixture),
+                  "baseline_production_sha256": digest(baseline / production),
+                  "candidate_production_sha256": digest(candidate / production),
+                  "submodules": dependencies}
+          if data["fixture_sha256"] != data["baseline_fixture_sha256"]:
+              raise SystemExit("the paired executable fixtures differ")
+          Path("diagnostics/baseline-provenance.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
+          git diff "$BASELINE_REVISION" -- core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp > diagnostics/direct-memory.patch
+      - name: Build the unchanged baseline runtime and executable fixture
+        run: |
+          baseline="$RUNNER_TEMP/direct-memory-baseline"
+          cmake -S "$baseline" -B "$baseline/build-memory" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DPython3_EXECUTABLE="$(command -v python3)" 2>&1 | tee diagnostics/baseline-configure.log
+          cmake --build "$baseline/build-memory" --parallel 2 --target guest_direct_memory_executable_tests \
+            2>&1 | tee diagnostics/baseline-build.log
+          file "$baseline/build-memory/tests/guest_direct_memory_executable_tests" > diagnostics/baseline-binary.txt
+          lipo "$baseline/build-memory/tests/guest_direct_memory_executable_tests" -verify_arch x86_64
+          shasum -a 256 "$baseline/build-memory/tests/guest_direct_memory_executable_tests" \
+            "$baseline/build-memory/core/libs/libs/unpatched/libc.prx" \
+            "$baseline/build-memory/core/libs/libs/unpatched/libkernel.prx" > diagnostics/baseline-runtime-sha256.txt
+      - name: Reproduce the baseline execute-permission failure
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import subprocess
+
+          binary = Path(os.environ["RUNNER_TEMP"]) / "direct-memory-baseline/build-memory/tests/guest_direct_memory_executable_tests"
+          command = [str(binary), "transition"]
+          process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, start_new_session=True)
+          timed_out = False
+          try:
+              output, _ = process.communicate(timeout=30)
+          except subprocess.TimeoutExpired:
+              timed_out = True
+              os.killpg(process.pid, signal.SIGKILL)
+              output, _ = process.communicate(timeout=2)
+          Path("diagnostics/baseline-transition.log").write_text(output, encoding="utf-8")
+          marker = "direct memory RW-to-RX failure: error=13 category=generic"
+          reproduced = not timed_out and process.returncode == 1 and marker in output.splitlines()
+          data = {"baseline_revision": os.environ["BASELINE_REVISION"], "candidate_revision": os.environ["GITHUB_SHA"],
+                  "command": command, "exit_code": process.returncode, "timed_out": timed_out,
+                  "expected_failure_reproduced": reproduced, "required_diagnostic": marker}
+          Path("diagnostics/baseline-report.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          print(output)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Unchanged direct-memory baseline\n\nExpected RW-to-RX permission failure reproduced: " + str(reproduced) + "\n")
+          if not reproduced:
+              raise SystemExit("baseline must exit normally with the specific execute-permission failure")
+          PY
       - name: Configure the x86-64 runtime and test inventory
         run: |
           cmake -S . -B build-memory -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -81,8 +185,8 @@ jobs:
         run: |
           cmake --build build-memory --parallel 2 --target guest_memory_tests \
             guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests \
-            agc_write_tracking_tests 2>&1 | tee diagnostics/build.log
-          for binary in guest_memory_tests guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests agc_write_tracking_tests; do
+            guest_direct_memory_executable_tests agc_write_tracking_tests 2>&1 | tee diagnostics/build.log
+          for binary in guest_memory_tests guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests guest_direct_memory_executable_tests agc_write_tracking_tests; do
             file "build-memory/tests/$binary"
             lipo "build-memory/tests/$binary" -verify_arch x86_64
             shasum -a 256 "build-memory/tests/$binary"
@@ -100,6 +204,9 @@ jobs:
             --junit diagnostics/ctest.xml --output diagnostics/report.json \
             --require guest_memory --require guest_mmap_fixed_anonymous \
             --require guest_direct_memory_lifecycle --require guest_direct_memory_for_app \
+            --require guest_direct_memory_executable_transition --require guest_direct_memory_executable_aliases \
+            --require guest_direct_memory_executable_partial_release --require guest_direct_memory_executable_replacement \
+            --require guest_direct_memory_executable_rejections \
             --require agc_write_tracking --require agc_write_tracking_generation_wrap
       - name: Upload memory regression diagnostics
         if: always()
@@ -111,5 +218,7 @@ jobs:
             build-memory/CMakeCache.txt
             build-memory/CMakeFiles/CMakeConfigureLog.yaml
             build-memory/Testing/Temporary/
+            ${{ runner.temp }}/direct-memory-baseline/build-memory/CMakeCache.txt
+            ${{ runner.temp }}/direct-memory-baseline/build-memory/CMakeFiles/CMakeConfigureLog.yaml
           retention-days: 7
           if-no-files-found: error
