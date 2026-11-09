@@ -21,7 +21,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = pathlib.Path(temporary.name)
+        self.root = pathlib.Path(temporary.name).resolve()
         self.build = self.root / "build"
         self.build.mkdir()
         self.libraries = self.root / "libraries"
