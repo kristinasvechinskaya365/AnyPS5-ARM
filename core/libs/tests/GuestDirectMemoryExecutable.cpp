@@ -144,15 +144,23 @@ void CheckPartialRelease() {
     Allocation allocation(Page * 3);
     Mapping writable(allocation.Physical(), Page * 3);
     Mapping executable(allocation.Physical(), Page * 3, Read);
+    Mapping tail(allocation.Physical(Page * 2), Page, Read);
+    std::fprintf(stderr, "partial release views: writable=%p executable=%p surviving_tail=%p\n", static_cast<void*>(writable.Data()), static_cast<void*>(executable.Data()), static_cast<void*>(tail.Data()));
     WriteReturn(writable.Data(), 11);
     WriteReturn(writable.Data(Page), 22);
     WriteReturn(writable.Data(Page * 2), 33);
     Protect(executable.Data(), Page * 3, Read | Execute);
     allocation.Release(Page, Page);
+    std::fprintf(stderr, "partial release: middle released; checking surviving prefix and tail\n");
     Require(Call(executable.Data()) == 11 && Call(executable.Data(Page * 2)) == 33, "partial physical release damaged surviving executable pages");
     void* missing = nullptr;
     Require(sceKernelMapDirectMemory(&missing, Page, Read, 0, allocation.Physical(Page), 0) == SCE_KERNEL_ERROR_ENOMEM && missing == nullptr, "released physical page remained mappable");
-    Mapping tail(allocation.Physical(Page * 2), Page, Read);
+    {
+        Mapping remappedTail(allocation.Physical(Page * 2), Page, Read);
+        Protect(remappedTail.Data(), Page, Read | Execute);
+        std::fprintf(stderr, "partial release: checking new offset alias=%p\n", static_cast<void*>(remappedTail.Data()));
+        Require(Call(remappedTail.Data()) == 33, "remapping after partial release lost the backing offset");
+    }
     Protect(tail.Data(), Page, Read | Execute);
     Require(Call(tail.Data()) == 33, "partial release lost the backing offset");
     WriteReturn(writable.Data(Page * 2), 44);
@@ -162,6 +170,7 @@ void CheckPartialRelease() {
     allocation.Release(0, Page);
     writable.Unmap();
     executable.Unmap();
+    std::fprintf(stderr, "partial release: prefix released and original views unmapped; checking surviving_tail=%p\n", static_cast<void*>(tail.Data()));
     Require(Call(tail.Data()) == 44, "releasing the prefix lost the final executable alias");
 }
 
