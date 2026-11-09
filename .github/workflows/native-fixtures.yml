@@ -34,8 +34,10 @@ defaults:
 jobs:
   scalar-references:
     name: Require scalar x86 references at both optimization levels
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - name: Check out the fixture without submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -118,9 +120,10 @@ jobs:
   native-fixtures:
     name: Required native arm64 CPU fixtures
     needs: scalar-references
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 75
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       BASELINE_REVISION: 795aa430be2bbb60054c0ad2e0a0812c81f91318
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       REQUIRED_CTESTS: '^native_(fixture_reporting|translator_cli|ffmpeg_fetch|packager)$'

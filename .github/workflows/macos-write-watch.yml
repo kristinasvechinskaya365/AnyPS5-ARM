@@ -28,7 +28,7 @@ defaults:
 jobs:
   write-watch:
     name: Write watch (${{ matrix.architecture }})
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -36,6 +36,7 @@ jobs:
       matrix:
         architecture: [arm64, x86_64]
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       BASELINE_REVISION: 4200e985786e177698d518253a272786b6adfce2
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       TEST_ARCHITECTURE: ${{ matrix.architecture }}

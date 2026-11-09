@@ -129,9 +129,10 @@ jobs:
 
   macos-runtime:
     name: Required macOS core tests under Rosetta
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 75
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       REQUIRED_TESTS: '^(guest_direct_memory_lifecycle|guest_direct_memory_for_app|title_run|macos_output|macos_fixed_base|sce_module_path|macos_fixtures_(argv|import|tls))$'
     steps:
@@ -229,8 +230,10 @@ jobs:
     name: Required Swift installer contract tests
     needs: macos-runtime
     if: ${{ !cancelled() }}
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - name: Check out tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -277,9 +280,10 @@ jobs:
     name: macOS write-watch regression comparison
     needs: macos-installer
     if: ${{ !cancelled() }}
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 20
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       BASELINE_REVISION: 13f46b088c4021266bf0e811a787dfce5332c7cd
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:

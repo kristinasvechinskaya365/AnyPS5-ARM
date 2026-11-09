@@ -39,9 +39,10 @@ defaults:
 jobs:
   memory-regressions:
     name: Required macOS memory and CPU write-tracking tests
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 75
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       BASELINE_REVISION: 861424137e7b0b801fa1f86958b486292a268a89
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       REQUIRED_TESTS: '^(guest_memory|guest_mmap_fixed_anonymous|guest_direct_memory_lifecycle|guest_direct_memory_for_app|guest_direct_memory_executable_(transition|aliases|partial_release|replacement|rejections)|guest_fixed_mapping_validation_(direct_flags_covered|direct_flags_overlap|direct_alignment_covered|direct_alignment_overlap|flexible_flags_covered|flexible_flags_overlap|direct_protection_overlap|flexible_protection_overlap|reserve_alignment|controls)|guest_file_mapping_validation_(shared_covered|shared_overlap|private_covered|private_overlap|controls)|agc_write_tracking|agc_write_tracking_generation_wrap)$'
