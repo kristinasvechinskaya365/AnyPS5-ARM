@@ -13,6 +13,17 @@ final class IssueDraftTests: XCTestCase {
         try? FileManager.default.removeItem(at: folder)
     }
 
+    private func bundle(_ repository: Any) throws -> Bundle {
+        let root = folder.appendingPathComponent("\(UUID().uuidString).bundle")
+        let contents = root.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info: [String: Any] = ["CFBundleIdentifier": "org.anyps5.tests.support.\(UUID().uuidString)",
+                                   "CFBundlePackageType": "BNDL", "AnyPS5Repository": repository]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return try XCTUnwrap(Bundle(url: root))
+    }
+
     private let privacy = ReportPrivacy(home: "/Users/ada", names: ["ada", "Ada Lovelace"], secrets: ["s3cr3t-refresh-token-value"])
     private let system = SystemInfo(model: "Mac15,7", chip: "Apple M3 Pro", memoryGB: 18, macOS: "15.6 (24G84)", displayHz: 120)
 
@@ -64,7 +75,7 @@ final class IssueDraftTests: XCTestCase {
         XCTAssertEqual(draft.title, "Crash: Stray (PPSA01234)")
         let components = try XCTUnwrap(URLComponents(url: draft.url, resolvingAgainstBaseURL: false))
         XCTAssertEqual(components.host, "github.com")
-        XCTAssertEqual(components.path, "/AnyTogether/AnyPS5-ARM/issues/new")
+        XCTAssertEqual(components.path, "/kristinasvechinskaya365/AnyPS5-ARM/issues/new")
         let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         XCTAssertEqual(query["template"], "crash.yml")
         XCTAssertEqual(query["title"], "Crash: Stray (PPSA01234)")
@@ -106,5 +117,49 @@ final class IssueDraftTests: XCTestCase {
         XCTAssertEqual(components.queryItems?.first { $0.name == "template" }?.value, "bug_report.yml")
         XCTAssertEqual(draft.title, "Crash: Stray (PPSA01234) 01.000.002")
         XCTAssertLessThanOrEqual(draft.url.absoluteString.count, IssueDraft.maximumLength)
+    }
+
+    func testLauncherIssuesUseTheForkByDefault() throws {
+        let problem = LauncherProblem(kind: .crash, at: Date(), version: "1", platform: "macOS")
+        let draft = IssueDraft.launcherProblem(problem, system: system, privacy: privacy)
+        let components = try XCTUnwrap(URLComponents(url: draft.url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.host, "github.com")
+        XCTAssertEqual(components.path, "/kristinasvechinskaya365/AnyPS5-ARM/issues/new")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "template" }?.value, "launcher_crash.yml")
+        XCTAssertEqual(IssueDraft.repository, "kristinasvechinskaya365/AnyPS5-ARM")
+        XCTAssertEqual(IssueDraft.launcherRepository, IssueDraft.repository)
+    }
+
+    func testConfiguredSupportLinksRetainExplicitUpstreamReporting() throws {
+        let bundle = try bundle("developer/Custom-Port")
+        let problem = LauncherProblem(kind: .crash, at: Date(), version: "1", platform: "macOS")
+        let crash = IssueDraft.crash(report(), bundle: bundle)
+        let launcher = IssueDraft.launcherProblem(problem, system: system, privacy: privacy, bundle: bundle)
+        for draft in [crash, launcher] {
+            XCTAssertEqual(draft.url.host, "github.com")
+            XCTAssertEqual(draft.url.path, "/developer/Custom-Port/issues/new")
+            XCTAssertLessThanOrEqual(draft.url.absoluteString.count, IssueDraft.maximumLength)
+        }
+        let upstream = IssueDraft.engine(report(), bundle: bundle)
+        XCTAssertEqual(upstream.url.path, "/boykopovar/AnyPS5/issues/new")
+        XCTAssertTrue(upstream.fields.first { $0.id == "commit" }?.value.contains("github.com/developer/Custom-Port") == true)
+    }
+
+    func testInvalidSupportMetadataFallsBackToTheKnownFork() throws {
+        let problem = LauncherProblem(kind: .crash, at: Date(), version: "1", platform: "macOS")
+        let values: [Any] = ["owner/repo/extra", "https://example.com/repo", ["owner", "repo"], String(repeating: "x", count: 8000) + "/repo"]
+        for value in values {
+            let bundle = try bundle(value)
+            XCTAssertNil(ReleaseRepository.configured(in: bundle))
+            let drafts = [IssueDraft.crash(report(), bundle: bundle),
+                          IssueDraft.launcherProblem(problem, system: system, privacy: privacy, bundle: bundle)]
+            for draft in drafts {
+                XCTAssertEqual(draft.url.host, "github.com")
+                XCTAssertEqual(draft.url.path, "/kristinasvechinskaya365/AnyPS5-ARM/issues/new")
+            }
+            let upstream = IssueDraft.engine(report(), bundle: bundle)
+            XCTAssertEqual(upstream.url.path, "/boykopovar/AnyPS5/issues/new")
+            XCTAssertTrue(upstream.fields.first { $0.id == "commit" }?.value.contains("github.com/kristinasvechinskaya365/AnyPS5-ARM") == true)
+        }
     }
 }

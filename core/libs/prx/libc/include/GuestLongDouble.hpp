@@ -4,11 +4,21 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 
 namespace LibcDetail {
 
 inline constexpr std::size_t GuestLongDoubleBytes = 16;
 
+#if defined(__APPLE__) && defined(__aarch64__)
+inline long double GuestLongDoubleLoad(const void*) {
+    throw std::invalid_argument("guest x87 long double is not ported to arm64");
+}
+
+inline void GuestLongDoubleStore(void*, long double) {
+    throw std::invalid_argument("guest x87 long double is not ported to arm64");
+}
+#else
 static_assert(std::numeric_limits<long double>::digits == 64 || std::numeric_limits<long double>::digits == 113);
 
 inline long double GuestLongDoubleLoad(const void* source) {
@@ -48,6 +58,8 @@ inline void GuestLongDoubleStore(void* target, long double value) {
         std::memcpy(target, bytes, sizeof(bytes));
     }
 }
+
+#endif
 
 }
 

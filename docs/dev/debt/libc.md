@@ -128,6 +128,11 @@
 
 ### Functional
 
+- [Native ARM64 math](../../../core/libs/prx/libc/src/Math.cpp) does not bridge guest x87 long-double values or x87/MXCSR environments. Long-double exports, x87 remainder/remquo, `_Fltrounds` and `fegetenv`/`fesetenv`/`feupdateenv`/`feholdexcept` reject explicitly. ARM `modff` raises host `FE_INVALID` for signaling NaNs; native runtime behavior remains unverified.
+- [Native ARM64 floating-point control](../../../core/libs/prx/libc/src/FloatingPoint.cpp) rejects the x87/MXCSR control exports. [MathExact.cpp](../../../core/libs/prx/libc/src/MathExact.cpp) also rejects long-double and SSE rounding conversions. [Bessel.cpp](../../../core/libs/prx/libc/src/Bessel.cpp) uses standard host FMA and square root on ARM; guest rounding and exception fidelity remain unverified there.
+- [Native ARM64 variadic arguments](../../../core/libs/prx/libc/include/GuestVarargs.hpp) require the translated guest call's System V register-save area. Calls outside that runtime fail. The formatter retains current secure, numbered-argument and wide-scan behavior; [guest x87 long-double load/store](../../../core/libs/prx/libc/include/GuestLongDouble.hpp) rejects on Apple ARM64 instead of treating 80-bit values as host doubles.
+- [Guest non-local jumps](../../../core/libs/prx/libc/src/JumpBuffer.cpp) have no ARM64 state or native-stack unwind bridge. The x86 assembly exports are absent on ARM64, so importing them fails; setjmp/longjmp behavior is not emulated.
+
 - [insque and remque](../../../core/libs/prx/libc/src/Queue.cpp) (libc) have not been verified on a console. A null element throws; behavior with corrupted links is unverified. Otherwise, the queue operations follow FreeBSD 11.4 [insque.c](https://github.com/freebsd/freebsd-src/blob/release/11.4.0/lib/libc/stdlib/insque.c) and [remque.c](https://github.com/freebsd/freebsd-src/blob/release/11.4.0/lib/libc/stdlib/remque.c).
 
 - [Call tracing](../../../core/libs/prx/libc/src/specifics/x86_64/CallTrace.cpp) (libc) - an unlabeled import whose function has no loaded host image, such as a generated code address, retains an empty library label; `all` still records it. Otherwise missing labels use the defining host module filename; supplied labels are retained.

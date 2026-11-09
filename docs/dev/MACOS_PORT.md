@@ -1,8 +1,10 @@
 # Apple Silicon (macOS) port: fork status
 
-This branch combines current `main` with the community macOS port from [mugurc/AnyPS5 `macos-port`](https://github.com/mugurc/AnyPS5/tree/macos-port), which upstream is reviewing in pieces (#927, #1597, #1499, #1686). It adds the fixes needed to build and run on top of current `main`.
+This fork combines the community macOS port from [mugurc/AnyPS5 `macos-port`](https://github.com/mugurc/AnyPS5/tree/macos-port) with the current runtime, launcher delivery fixes and the optional [native ARM64 translator](NATIVE_ARM64.md). The default installable app uses the Rosetta engine; the translator remains a separate experimental build.
 
-Guest code stays x86-64 and runs under Rosetta 2. The relinker writes Mach-O (`--macos`), the prx libraries build as x86-64 dylibs, and Vulkan runs through MoltenVK. Apple has announced that macOS 27 is the last release with full Rosetta support, so this route has a limited lifetime.
+Guest code stays x86-64 and runs under Rosetta 2. The relinker writes Mach-O (`--macos`), the prx libraries build as x86-64 dylibs, and Vulkan runs through MoltenVK. [Apple describes general-purpose Rosetta support through macOS 27](https://developer.apple.com/news/?id=w5ngl9k2). The later exception for older unmaintained games does not establish support for this engine.
+
+For installation, use the [packaged app](#installing-a-packaged-app). The build instructions below are for development. The workflow builds the complete engine and universal launcher, packages their runtime dependencies, hides the source build directories and SDK, and verifies both launcher architectures and the installed copy. An ARM64 engine compile and the native translator fixtures are separate checks; neither is a game or GPU compatibility result.
 
 ## Build
 
@@ -27,9 +29,9 @@ build-mac/core/relinker/relinker --macos --to-rosetta source/eboot.bin out/eboot
 python3 tools/package_macos_app.py --relinked out --game source --libs build-mac/core/libs/libs --vulkan ~/VulkanSDK/<version>/macOS Title.app
 ```
 
-## Status
+## Historical upstream measurements
 
-Measured on an M3 Pro with macOS 26.6, Vulkan SDK 1.4.363.0 and MoltenVK:
+The following measurements were inherited from the community port, reported on an M3 Pro with macOS 26.6, Vulkan SDK 1.4.363.0 and MoltenVK. They are not results from the current fork or an M2 Mac. Current regression evidence is attached to the exact commits in this fork's [Actions runs](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions).
 
 | Check | Result |
 |---|---|
@@ -46,7 +48,7 @@ The 14 tests that fail (macOS 26.1, MoltenVK 1.4.2):
 - **Host platform (5):** `agc_thread_priority_refused_rt`, `agc_thread_priority_refused_high` and `agc_driver_pm4_priority_refused` expect a refused priority request to throw, `agc_shared_write` cannot inspect mapping lifetimes, and `check_skips` passes from the repository root but not from the working directory ctest gives it.
 - **`patched_libraries`:** loads all patched libraries and exceeds the 300 s test timeout only when the whole suite runs in parallel after a rebuild; it passes alone.
 
-`macos_fixtures` passes once on a fresh build and times out in every later run: its `argv` fixture, which ends with `int3`, stays exiting in the kernel under Rosetta until a reboot. It was left out of the run above.
+The historical run excluded `macos_fixtures` after an `int3` exit hung under Rosetta. The current foundation gate requires repeated fixture executions and retains their exit status and logs; that historical exclusion is not an accepted result for current builds.
 
 Changes on top of the merged port:
 
@@ -98,7 +100,7 @@ sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS
 ```
 
 The installer uses macOS's built-in tools and defaults to `~/Applications/AnyPS5.app`.
-It requires macOS 14 or newer, checks the app's declared minimum system version,
+The [macOS installable app workflow](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) retains the complete app artifact for 90 days; a manual run on `main` rebuilds expired artifacts. The package records the highest minimum macOS version required by any bundled Mach-O slice, with a floor of 14.0. The installer requires macOS 14 or newer, checks that declared minimum system version,
 compatible executable and code-signature integrity, and preserves an existing app
 until its replacement is ready. Failed placement restores the previous app; if the
 destination prevents restoration, the error names the preserved recovery copy.

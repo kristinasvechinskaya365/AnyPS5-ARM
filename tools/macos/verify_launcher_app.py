@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from bundle_minimum import check_declared, inspect
+
 
 def command(arguments, timeout=30, environment=None):
     result = subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -27,22 +29,15 @@ def verify(app, revision, repository):
     if info.get("CFBundleIdentifier") != "org.anyps5.launcher":
         raise ValueError("unexpected launcher bundle identifier")
     command(["codesign", "--verify", "--deep", "--strict", str(app)], timeout=120)
+    minimum = inspect(app)
+    declared = info.get("LSMinimumSystemVersion")
+    check_declared(minimum, declared)
     toolkit = app / "Contents/Resources/toolkit"
     libraries = sorted((toolkit / "libs").glob("*.prx"))
-    if not libraries:
-        raise ValueError("no engine libraries were packaged")
-    files = [(app / "Contents/MacOS" / name, ["arm64", "x86_64"]) for name in ("AnyPS5", "anyps5-tool")]
-    files.extend((app / f"Contents/Frameworks/{name}.framework/{name}", ["arm64", "x86_64"])
-                 for name in ("WebRTC", "LiveKitWebRTC", "RustLiveKitUniFFI"))
-    files.extend((path, ["x86_64"]) for path in [toolkit / "relinker", *libraries,
-                 toolkit / "vulkan/libvulkan.1.dylib", toolkit / "vulkan/libMoltenVK.dylib"])
     binaries = []
-    for path, expected in files:
-        resolved = path.resolve(strict=True)
-        if not resolved.is_relative_to(app):
-            raise ValueError(f"bundled binary escapes the application: {path}")
-        command(["lipo", str(path), "-verify_arch", *expected])
-        architectures = command(["lipo", "-archs", str(path)]).split()
+    for binary in minimum["binaries"]:
+        path = app / binary["path"]
+        architectures = binary["architectures"]
         command(["codesign", "--verify", "--strict", str(path)])
         dependencies = {}
         for architecture in architectures:
@@ -57,6 +52,7 @@ def verify(app, revision, repository):
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         binaries.append({"path": str(path.relative_to(app)), "sha256": digest,
                          "architectures": architectures, "dependencies": dependencies,
+                         "minimum_macos": binary["minimum_macos"],
                          "uuids": command(["dwarfdump", "--uuid", str(path)])})
     environment = dict(os.environ)
     for name in ("DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH", "ANYPS5_TOOLKIT"):
@@ -79,6 +75,7 @@ def verify(app, revision, repository):
     if not relinker.strip():
         raise ValueError("the packaged relinker did not identify itself")
     return {"passed": True, "revision": revision, "repository": repository, "app": str(app),
+            "minimum_macos": minimum["minimum_macos"], "declared_minimum_macos": declared,
             "library_count": len(libraries), "binaries": binaries, "executions": checks, "relinker": relinker}
 
 

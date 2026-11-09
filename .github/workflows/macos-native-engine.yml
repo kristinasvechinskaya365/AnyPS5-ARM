@@ -1,0 +1,241 @@
+name: macOS native arm64 engine compile
+
+on:
+  push:
+    branches: [main, 'codex/main-integration']
+    paths:
+      - .github/workflows/macos-native-engine.yml
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/**
+      - tools/macos/fetch_ffmpeg.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-native-engine-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  arm64-engine:
+    name: Compile every native arm64 PRX library
+    runs-on: macos-26
+    timeout-minutes: 150
+    env:
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Check out the exact source and default pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+          filter: blob:none
+          persist-credentials: false
+      - name: Record native host and source dependencies
+        id: source
+        run: |
+          mkdir -p diagnostics
+          {
+            sw_vers
+            uname -m
+            xcodebuild -version
+            clang++ --version
+            cmake --version
+          } > diagnostics/toolchain.txt
+          test "$(uname -m)" = arm64
+          printf 'SDKROOT=%s\n' "$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import re
+          import subprocess
+
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["GITHUB_SHA"] or platform.system() != "Darwin" or platform.machine() != "arm64":
+              raise SystemExit("the source or host does not match the native build")
+          subprocess.run(["git", "diff", "--exit-code"], check=True)
+          status = subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True)
+          Path("diagnostics/submodules.txt").write_text(status)
+          dependencies = []
+          for line in status.splitlines():
+              match = re.match(r"^([ +\-U])([0-9a-f]{40}) (\S+)(?: .*)?$", line)
+              if match is None:
+                  raise SystemExit("unrecognized submodule identity")
+              state, commit, path = match.groups()
+              optional = path == "3rdparty/llvm-project"
+              if state != ("-" if optional else " "):
+                  raise SystemExit(f"submodule checkout does not match its policy: {path}")
+              dependencies.append({"path": path, "revision": commit, "initialized": not optional})
+          if not dependencies or not any(item["path"] == "3rdparty/llvm-project" for item in dependencies):
+              raise SystemExit("the complete dependency inventory is unavailable")
+          policy = subprocess.check_output(["git", "config", "-f", ".gitmodules", "submodule.3rdparty/llvm-project.update"], text=True).strip()
+          if policy != "none" or Path("3rdparty/llvm-project/llvm/CMakeLists.txt").exists():
+              raise SystemExit("the ordinary engine checkout must leave optional LLVM uninitialized")
+          expected = sorted(path.name + ".prx" for path in Path("core/libs/prx").iterdir() if path.is_dir())
+          required = {"libc.prx", "libkernel.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx", "libSceAudioOut.prx"}
+          if not required <= set(expected):
+              raise SystemExit("the source library inventory is incomplete")
+          report = {"schema_version": 1, "revision": revision, "host": {"system": platform.system(), "machine": platform.machine(), "release": platform.release()},
+                    "gitmodules_sha256": hashlib.sha256(Path(".gitmodules").read_bytes()).hexdigest(),
+                    "optional_llvm_initialized": False, "dependencies": dependencies, "expected_prx": expected}
+          Path("diagnostics/source.json").write_text(json.dumps(report, indent=2) + "\n")
+          PY
+      - name: Install build tools
+        run: brew install ninja ccache 2>&1 | tee diagnostics/homebrew.log
+      - name: Restore the native compiler cache
+        uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d
+        with:
+          key: macos-native-engine-arm64
+          max-size: 3G
+          evict-old-files: job
+      - name: Acquire the pinned arm64 FFmpeg package
+        id: ffmpeg
+        timeout-minutes: 6
+        run: |
+          python3 tools/macos/fetch_ffmpeg.py --repo . --architecture arm64 \
+            --destination "$RUNNER_TEMP/ffmpeg-arm64" --report diagnostics/ffmpeg-acquisition.json \
+            2>&1 | tee diagnostics/ffmpeg-acquisition.log
+      - name: Configure the full native engine from source
+        id: configure
+        run: |
+          cmake -S . -B build-native-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DANYPS5_USE_SYSTEM_DEPS=OFF -DANYPS5_RELINKER_ONLY=OFF \
+            -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFFMPEG_PREBUILT_DIR:PATH="$RUNNER_TEMP/ffmpeg-arm64" \
+            2>&1 | tee diagnostics/configure.log
+      - name: Compile and patch every PRX library
+        id: build
+        run: |
+          cmake --build build-native-engine --target libs --parallel 2 2>&1 | tee diagnostics/build.log
+      - name: Require the complete native compile and binary evidence
+        if: always()
+        env:
+          SOURCE_OUTCOME: ${{ steps.source.outcome }}
+          FFMPEG_OUTCOME: ${{ steps.ffmpeg.outcome }}
+          CONFIGURE_OUTCOME: ${{ steps.configure.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY' 2>&1 | tee diagnostics/gate.log
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import struct
+          import subprocess
+
+          directory = Path("diagnostics")
+          errors = []
+          outcomes = {name: os.environ[name.upper() + "_OUTCOME"] for name in ("source", "ffmpeg", "configure", "build")}
+          for name, outcome in outcomes.items():
+              if outcome != "success":
+                  errors.append(f"required {name} step did not succeed: {outcome}")
+
+          def require(condition, message):
+              if not condition:
+                  errors.append(message)
+
+          def digest(path):
+              value = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1 << 20), b""):
+                      value.update(chunk)
+              return value.hexdigest()
+
+          source = None
+          binaries = []
+          try:
+              source = json.loads((directory / "source.json").read_text())
+              require(type(source["schema_version"]) is int and source["schema_version"] == 1 and source["revision"] == os.environ["GITHUB_SHA"], "source identity differs from the event")
+              require(source["host"]["system"] == "Darwin" and source["host"]["machine"] == "arm64" and source["optional_llvm_initialized"] is False, "source host or optional dependency policy changed")
+              require(source["gitmodules_sha256"] == digest(Path(".gitmodules")), "dependency declarations changed")
+              require(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == source["revision"], "checkout revision changed during the build")
+              subprocess.run(["git", "diff", "--exit-code"], check=True)
+              require(subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True) == (directory / "submodules.txt").read_text(), "dependency revisions changed during the build")
+              cache = {}
+              for line in Path("build-native-engine/CMakeCache.txt").read_text().splitlines():
+                  match = re.fullmatch(r"([^#/:=]+):[^=]+=(.*)", line)
+                  if match:
+                      cache[match[1]] = match[2]
+              expected_cache = {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "ANYPS5_RELINKER_ONLY": "OFF", "ANYPS5_USE_SYSTEM_DEPS": "OFF",
+                                "CMAKE_OSX_ARCHITECTURES": "arm64", "CMAKE_APPLE_SILICON_PROCESSOR": "arm64", "FFMPEG_PREBUILT_DIR": str(Path(os.environ["RUNNER_TEMP"]) / "ffmpeg-arm64")}
+              require(all(cache.get(name) == value for name, value in expected_cache.items()), "the complete engine did not use the required ARM64 source configuration")
+              require(Path(cache["CMAKE_HOME_DIRECTORY"]).resolve() == Path.cwd().resolve(), "CMake used a different source checkout")
+              package = json.loads((directory / "ffmpeg-acquisition.json").read_text())
+              revision = "9ac4cfd195f192ed8b08566f49c28dbb48d08341"
+              expected_asset = {"name": "ffmpeg-macos-arm64.zip", "url": f"https://github.com/KytyPS5/ext-ffmpeg-core/releases/download/{revision[:12]}/ffmpeg-macos-arm64.zip",
+                                "asset_id": 567718242, "api_url": "https://api.github.com/repos/KytyPS5/ext-ffmpeg-core/releases/assets/567718242",
+                                "sha256": "458933af900b2bf0bf3d4422e3ae1c7aef46f671cd4af99c42ffe99d43ca9170", "size": 13316412}
+              require(type(package["schema_version"]) is int and package["schema_version"] == 1 and package["passed"] is True and package["stage"] == "complete" and "error" not in package, "FFmpeg acquisition did not complete")
+              require(package["source_revision"] == source["revision"] and package["revision"] == package["gitlink_revision"] == package["submodule_revision"] == revision, "FFmpeg revisions do not match the verified pin")
+              destination = Path(cache["FFMPEG_PREBUILT_DIR"])
+              require(package["architecture"] == "arm64" and package["dependency"] == "FFmpeg" and package["asset"] == expected_asset and Path(package["destination"]).resolve() == destination.resolve(), "FFmpeg package identity differs from CMake's selected package")
+              require(package["helper_sha256"] == digest(Path("tools/macos/fetch_ffmpeg.py")), "FFmpeg acquisition helper changed")
+              attempts = package["attempts"]
+              require(1 <= len(attempts) <= 3 and [entry["number"] for entry in attempts] == list(range(1, len(attempts) + 1)), "FFmpeg attempt inventory is invalid")
+              for index, entry in enumerate(attempts):
+                  require(entry["route"] == ("release" if index == 0 else "asset-api") and entry["url"] == expected_asset["url" if index == 0 else "api_url"] and entry["accept"] == (None if index == 0 else "application/octet-stream"), "FFmpeg used an unexpected transport route")
+              require(all(entry.get("transient") is True and "error_type" in entry for entry in attempts[:-1]), "FFmpeg retried a permanent failure")
+              require(attempts[-1]["http_status"] == 200 and attempts[-1]["bytes"] == expected_asset["size"] and attempts[-1]["sha256"] == expected_asset["sha256"] and "error_type" not in attempts[-1], "FFmpeg transfer lacks verified content evidence")
+              names = [entry["path"] for entry in package["files"]]
+              require(len(names) == len(set(names)) == 155 and sorted(names) == sorted(str(path.relative_to(destination)) for path in destination.rglob("*") if path.is_file()), "FFmpeg file inventory is incomplete")
+              for entry in package["files"]:
+                  path = destination / entry["path"]
+                  require(path.resolve().is_relative_to(destination.resolve()) and path.is_file() and not path.is_symlink(), "invalid FFmpeg inventory path")
+                  require(type(entry["size"]) is int and path.stat().st_size == entry["size"] and digest(path) == entry["sha256"], "FFmpeg content changed after acquisition")
+              expected = source["expected_prx"]
+              require(expected == sorted(path.name + ".prx" for path in Path("core/libs/prx").iterdir() if path.is_dir()), "source library inventory changed")
+              libraries = Path("build-native-engine/core/libs/libs")
+              for kind, folder in (("patched", libraries), ("unpatched", libraries / "unpatched")):
+                  require(sorted(path.name for path in folder.glob("*.prx")) == expected, f"{kind} PRX inventory is incomplete")
+                  for name in expected:
+                      path = folder / name
+                      require(path.is_file() and not path.is_symlink(), f"missing regular {kind} PRX: {name}")
+                      with path.open("rb") as stream:
+                          header = stream.read(32)
+                      require(len(header) == 32 and struct.unpack_from("<I", header)[0] == 0xFEEDFACF and struct.unpack_from("<I", header, 4)[0] == 0x0100000C and struct.unpack_from("<I", header, 12)[0] == 6, f"{kind} PRX is not a thin arm64 Mach-O dylib: {name}")
+                      entry = {"kind": kind, "name": name, "size": path.stat().st_size, "sha256": digest(path)}
+                      if kind == "patched":
+                          signed = subprocess.run(["codesign", "--verify", "--strict", str(path)], capture_output=True, text=True, timeout=10)
+                          entry["codesign_exit"] = signed.returncode
+                          entry["codesign_output"] = signed.stdout + signed.stderr
+                          require(signed.returncode == 0, f"patched PRX signature did not verify: {name}")
+                      binaries.append(entry)
+          except (OSError, ValueError, TypeError, KeyError, IndexError, struct.error, subprocess.SubprocessError) as error:
+              errors.append(f"compile evidence: {error}")
+          report = {"schema_version": 1, "revision": os.environ["GITHUB_SHA"], "passed": not errors,
+                    "coverage": "full native arm64 engine compile and PRX signatures; no guest or GPU execution", "steps": outcomes,
+                    "expected_prx": source.get("expected_prx", []) if isinstance(source, dict) else [], "binaries": binaries, "errors": errors}
+          (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write(f"### Native arm64 engine compile\n\nRevision: `{report['revision']}`\n\n{'FAIL' if errors else 'PASS'}; expected PRX libraries: {len(report['expected_prx'])}.\n\nThis gate compiles the full engine and verifies ARM64 library headers and signatures. It does not execute guest code or validate GPU behavior.\n")
+              stream.write("\n".join(f"- {error}" for error in errors) + "\n")
+          print(json.dumps({"revision": report["revision"], "passed": report["passed"], "expected_prx_count": len(report["expected_prx"]),
+                            "verified_binary_count": len(binaries), "errors": errors}, indent=2))
+          raise SystemExit(bool(errors))
+          PY
+      - name: Upload native engine compilation diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-native-engine-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/
+            build-native-engine/CMakeCache.txt
+            build-native-engine/CMakeFiles/CMakeConfigureLog.yaml
+            build-native-engine/build.ninja
+          retention-days: 30
+          if-no-files-found: error

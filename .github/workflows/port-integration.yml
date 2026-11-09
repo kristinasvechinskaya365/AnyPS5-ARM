@@ -1,0 +1,431 @@
+name: Port integration
+
+on:
+  push:
+    branches: [main, 'codex/main-integration']
+    paths:
+      - .github/workflows/port-integration.yml
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/**
+      - tools/required_test_report.py
+      - tools/tests/test_required_test_report.py
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/port-integration.yml
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/**
+      - tools/required_test_report.py
+      - tools/tests/test_required_test_report.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  paired-vulkan:
+    name: Paired default-engine Vulkan regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      BASELINE_REVISION: 40bdf174ec995fa3e6ecba1bc8f6138c40f0d374
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NOHASHDIR: 'true'
+      ANYPS5_REQUIRE_VULKAN: '1'
+      ANYPS5_NO_SHADER_CACHE: '1'
+      VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+      GALLIUM_OVERRIDE_CPU_CAPS: avx
+    steps:
+      - name: Check out the candidate revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Install the default engine toolchain and software Vulkan
+        run: |
+          mkdir -p diagnostics
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-12 ninja-build pkg-config ccache \
+            libpipewire-0.3-dev libdecor-0-dev libvulkan-dev libx11-dev libxext-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libpulse-dev libasound2-dev \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
+          sudo sysctl -w vm.unprivileged_userfaultfd=1
+          echo "CCACHE_DIR=$RUNNER_TEMP/port-integration-ccache" >> "$GITHUB_ENV"
+          ccache --version > diagnostics/ccache-version.txt
+          {
+            uname -a
+            g++-12 --version
+            cmake --version
+            python3 --version
+            dpkg-query -W mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+          } > diagnostics/host.txt
+      - name: Prepare the immutable baseline and identical default dependencies
+        id: sources
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          candidate = Path.cwd()
+          baseline = Path(os.environ['RUNNER_TEMP']) / 'port-integration-baseline'
+          revision = os.environ['BASELINE_REVISION']
+          def git(*arguments, cwd=candidate):
+              return subprocess.check_output(['git', *arguments], cwd=cwd, text=True).strip()
+          def links(ref):
+              entries = {}
+              for line in git('ls-tree', '-r', ref, '--', '3rdparty').splitlines():
+                  metadata, path = line.split('\t', 1)
+                  mode, kind, digest = metadata.split()
+                  if mode == '160000':
+                      entries[path] = digest
+              return entries
+          if git('rev-parse', 'HEAD') != os.environ['GITHUB_SHA']:
+              raise SystemExit('the candidate is not the event revision')
+          baseline_links, candidate_links = links(revision), links('HEAD')
+          if not baseline_links:
+              raise SystemExit('the baseline dependency inventory is empty')
+          for path, digest in baseline_links.items():
+              if candidate_links.get(path) != digest:
+                  raise SystemExit(f'the default dependency changed: {path}')
+          extra = set(candidate_links) - set(baseline_links)
+          if extra - {'3rdparty/llvm-project', '3rdparty/capstone'}:
+              raise SystemExit(f'uncompared dependencies: {sorted(extra)}')
+          fixtures = [
+              'core/libs/prx/libSceAgcDriver/tests/Pm4.cpp',
+              'core/libs/prx/libSceAgcDriver/tests/Recorder.cpp',
+              'core/libs/prx/libSceAgcDriver/tests/execution/SameQueueLabelWait.cpp',
+          ]
+          tests_path = 'core/libs/prx/libSceAgcDriver/tests'
+          tests_tree = git('rev-parse', f'{revision}:{tests_path}')
+          if tests_tree != git('rev-parse', f'HEAD:{tests_path}'):
+              raise SystemExit('the paired test helpers or registration changed')
+          for path in fixtures:
+              if git('rev-parse', f'{revision}:{path}') != git('rev-parse', f'HEAD:{path}'):
+                  raise SystemExit(f'the paired fixture changed: {path}')
+          with open('diagnostics/submodules.log', 'w') as output:
+              result = subprocess.run(['git', 'submodule', 'update', '--init', '--recursive', '--jobs', '4', '--',
+                                       *sorted(baseline_links)], stdout=output, stderr=subprocess.STDOUT)
+          if result.returncode:
+              raise SystemExit('default dependency checkout failed; see submodules.log')
+          status = git('submodule', 'status', '--recursive', '--', *sorted(baseline_links))
+          Path('diagnostics/submodules.txt').write_text(status + '\n')
+          if any(line.startswith(('-', '+', 'U')) for line in status.splitlines()):
+              raise SystemExit('a default dependency is uninitialized or at the wrong revision')
+          subprocess.run(['git', '-c', 'submodule.recurse=false', 'worktree', 'add', '--detach', str(baseline), revision], check=True)
+          for path, digest in baseline_links.items():
+              source = candidate / path
+              if git('rev-parse', 'HEAD', cwd=source) != digest:
+                  raise SystemExit(f'dependency identity mismatch: {path}')
+              subprocess.run(['git', 'diff', '--ignore-submodules=none', '--exit-code', 'HEAD'], cwd=source, check=True)
+              target = baseline / path
+              if target.exists():
+                  target.rmdir()
+              target.symlink_to(source, target_is_directory=True)
+          for source, expected in ((baseline, revision), (candidate, os.environ['GITHUB_SHA'])):
+              if git('rev-parse', 'HEAD', cwd=source) != expected:
+                  raise SystemExit('a source revision changed while preparing the comparison')
+              subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', '.', ':!3rdparty'], cwd=source, check=True)
+          data = {
+              'baseline_revision': revision, 'candidate_revision': os.environ['GITHUB_SHA'],
+              'baseline_tree': git('rev-parse', f'{revision}^{{tree}}'),
+              'candidate_tree': git('rev-parse', 'HEAD^{tree}'),
+              'default_dependencies': baseline_links,
+              'standalone_translator_dependencies': {path: candidate_links[path] for path in sorted(extra)},
+              'fixtures': {path: git('rev-parse', f'{revision}:{path}') for path in fixtures},
+              'tests_tree': tests_tree,
+              'baseline_source': str(baseline), 'candidate_source': str(candidate),
+              'workflow_sha256': hashlib.sha256(Path('.github/workflows/port-integration.yml').read_bytes()).hexdigest(),
+          }
+          Path('diagnostics/source-identity.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+      - name: Select lavapipe and verify the validation layer
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          manifests = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
+          if len(manifests) != 1:
+              raise SystemExit(f'expected one lavapipe manifest, found {manifests}')
+          manifest = str(manifests[0])
+          layer = Path('/usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json')
+          if not layer.is_file() or json.loads(layer.read_text()).get('layer', {}).get('name') != 'VK_LAYER_KHRONOS_validation':
+              raise SystemExit('the Khronos validation layer manifest is missing')
+          environment = dict(os.environ, VK_ICD_FILENAMES=manifest, VK_DRIVER_FILES=manifest)
+          result = subprocess.run(['vulkaninfo', '--summary'], env=environment, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, timeout=60)
+          Path('diagnostics/vulkan-info.txt').write_text(result.stdout)
+          if result.returncode or 'VK_LAYER_KHRONOS_validation' not in result.stdout or 'llvmpipe' not in result.stdout.lower():
+              raise SystemExit('lavapipe and the validation layer were not available; see vulkan-info.txt')
+          if 'was not found but was requested by env var VK_INSTANCE_LAYERS' in result.stdout:
+              raise SystemExit('the requested validation layer was not loaded')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'VK_ICD_FILENAMES={manifest}\nVK_DRIVER_FILES={manifest}\n')
+          Path('diagnostics/vulkan-manifest.json').write_text(manifests[0].read_text())
+          Path('diagnostics/validation-layer.json').write_text(layer.read_text())
+          PY
+      - name: Build the unchanged baseline with the default configuration
+        id: baseline
+        run: |
+          source="$RUNNER_TEMP/port-integration-baseline"
+          ccache -M 3G
+          CCACHE_BASEDIR="$source" cmake -S "$source" -B "$source/build-port" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            2>&1 | tee diagnostics/baseline-configure.log
+          CCACHE_BASEDIR="$source" cmake --build "$source/build-port" --parallel 2 \
+            --target agc_driver_pm4_tests agc_driver_same_queue_label_wait_tests agc_driver_recorder_tests \
+            2>&1 | tee diagnostics/baseline-build.log
+          ccache -s > diagnostics/baseline-ccache.txt
+      - name: Build the candidate with the same default configuration
+        id: candidate
+        run: |
+          test ! -e build-port
+          mkdir build-port
+          cp -a "$RUNNER_TEMP/port-integration-baseline/build-port/externals" build-port/externals
+          CCACHE_BASEDIR="$PWD" cmake -S . -B build-port -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            2>&1 | tee diagnostics/candidate-configure.log
+          CCACHE_BASEDIR="$PWD" cmake --build build-port --parallel 2 \
+            --target agc_driver_pm4_tests agc_driver_same_queue_label_wait_tests agc_driver_recorder_tests \
+            2>&1 | tee diagnostics/candidate-build.log
+          ccache -s > diagnostics/candidate-ccache.txt
+      - name: Run the same three focused tests once on each revision
+        id: execution
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import subprocess
+
+          identity = json.loads(Path('diagnostics/source-identity.json').read_text())
+          names = ['agc_driver_pm4', 'agc_driver_same_queue_label_wait_draw_pipeline', 'agc_completion_label_wait']
+          pattern = '^(' + '|'.join(names) + ')$'
+          required_environment = {'ANYPS5_REQUIRE_VULKAN': '1', 'ANYPS5_NO_SHADER_CACHE': '1',
+                                  'VK_INSTANCE_LAYERS': 'VK_LAYER_KHRONOS_validation', 'GALLIUM_OVERRIDE_CPU_CAPS': 'avx'}
+          if any(os.environ.get(key) != value for key, value in required_environment.items()):
+              raise SystemExit('a required Vulkan comparison setting is missing')
+          if not os.environ.get('VK_DRIVER_FILES') or os.environ.get('VK_ICD_FILENAMES') != os.environ['VK_DRIVER_FILES']:
+              raise SystemExit('both revisions must use the same explicit lavapipe driver')
+          required_environment.update(VK_DRIVER_FILES=os.environ['VK_DRIVER_FILES'], VK_ICD_FILENAMES=os.environ['VK_ICD_FILENAMES'])
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def files(folder):
+              return {str(path.relative_to(folder)): digest(path) for path in sorted(folder.rglob('*')) if path.is_file()}
+          def cache(path):
+              values = {}
+              for line in path.read_text().splitlines():
+                  if line.startswith(('#', '//')) or '=' not in line or ':' not in line.split('=', 1)[0]:
+                      continue
+                  name, value = line.split('=', 1)
+                  values[name.split(':', 1)[0]] = value
+              return values
+          defaults = {'CMAKE_BUILD_TYPE': 'Release', 'BUILD_TESTING': 'ON', 'ANYPS5_RELINKER_ONLY': 'OFF',
+                      'ANYPS5_USE_SYSTEM_DEPS': 'OFF', 'ANYPS5_ENABLE_ASAN': 'OFF', 'ANYPS5_ENABLE_TSAN': 'OFF',
+                      'ANYPS5_ENABLE_SPIRV_TOOLS': 'OFF', 'ANYPS5_BUILD_WASM': 'OFF', 'FFMPEG_PREBUILT_DIR': ''}
+          execution = {'environment': required_environment, 'required_tests': names, 'lanes': {}}
+          configurations = {}
+          for lane in ('baseline', 'candidate'):
+              source = Path(identity[f'{lane}_source'])
+              build = source / 'build-port'
+              values = cache(build / 'CMakeCache.txt')
+              if any(values.get(key) != value for key, value in defaults.items()):
+                  raise SystemExit(f'{lane} is not the required default engine configuration')
+              configuration = {key: values.get(key) for key in (*defaults, 'CMAKE_C_COMPILER', 'CMAKE_CXX_COMPILER',
+                  'CMAKE_C_COMPILER_LAUNCHER', 'CMAKE_CXX_COMPILER_LAUNCHER', 'CMAKE_C_FLAGS', 'CMAKE_CXX_FLAGS',
+                  'CMAKE_C_FLAGS_RELEASE', 'CMAKE_CXX_FLAGS_RELEASE', 'CMAKE_EXE_LINKER_FLAGS')}
+              configurations[lane] = configuration
+              if lane == 'candidate' and configuration != configurations['baseline']:
+                  raise SystemExit('the baseline and candidate compiler configurations differ')
+              external = files(build / 'externals')
+              if not external or not any(name.endswith('ffmpeg-linux-x64.zip') for name in external):
+                  raise SystemExit(f'{lane} has no recorded default Linux FFmpeg package')
+              if lane == 'baseline':
+                  baseline_external = external
+              elif external != baseline_external:
+                  raise SystemExit('the baseline and candidate FFmpeg package bytes differ')
+              binaries = {name: digest(build / 'tests' / name) for name in
+                          ('agc_driver_pm4_tests', 'agc_driver_same_queue_label_wait_tests', 'agc_driver_recorder_tests')}
+              runtime = files(build / 'core/libs/libs/unpatched')
+              if not runtime:
+                  raise SystemExit(f'{lane} has no built runtime libraries')
+              with open(f'diagnostics/{lane}-runtime-links.txt', 'w') as output:
+                  for binary in binaries:
+                      subprocess.run(['ldd', str(build / 'tests' / binary)], stdout=output, stderr=subprocess.STDOUT, check=True)
+              inventory = subprocess.run(['ctest', '--test-dir', str(build), '-N', '--show-only=json-v1', '-R', pattern],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+              Path(f'diagnostics/{lane}-inventory.json').write_text(inventory.stdout)
+              Path(f'diagnostics/{lane}-discovery.log').write_text(inventory.stderr)
+              command = ['ctest', '--test-dir', str(build), '-R', pattern, '-V', '--no-tests=error', '--parallel', '1',
+                         '--timeout', '30', '--output-junit', str(Path(f'diagnostics/{lane}.xml').resolve())]
+              process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         text=True, errors='replace', start_new_session=True)
+              timed_out = False
+              try:
+                  output, _ = process.communicate(timeout=135)
+              except subprocess.TimeoutExpired:
+                  timed_out = True
+                  os.killpg(process.pid, signal.SIGKILL)
+                  output, _ = process.communicate()
+              Path(f'diagnostics/{lane}-ctest.log').write_text(output)
+              print(f'{lane}: {identity[f"{lane}_revision"]}\n{output}', flush=True)
+              execution['lanes'][lane] = {'revision': identity[f'{lane}_revision'], 'inventory_exit': inventory.returncode,
+                                         'ctest_exit': process.returncode, 'timed_out': timed_out, 'command': command,
+                                         'configuration': configuration, 'external_sha256': external,
+                                         'binary_sha256': binaries, 'runtime_sha256': runtime}
+              Path('diagnostics/execution.json').write_text(json.dumps(execution, indent=2) + '\n')
+          for lane in ('baseline', 'candidate'):
+              source = Path(identity[f'{lane}_source'])
+              actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
+              if actual != identity[f'{lane}_revision']:
+                  raise SystemExit(f'{lane} source revision changed during execution')
+              subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', '.', ':!3rdparty'], cwd=source, check=True)
+          for path, revision in identity['default_dependencies'].items():
+              source = Path(identity['candidate_source']) / path
+              actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
+              if actual != revision:
+                  raise SystemExit(f'default dependency revision changed: {path}')
+              subprocess.run(['git', 'diff', '--ignore-submodules=none', '--exit-code', 'HEAD'], cwd=source, check=True)
+          execution['source_unchanged_after_tests'] = True
+          Path('diagnostics/execution.json').write_text(json.dumps(execution, indent=2) + '\n')
+          if any(lane['inventory_exit'] != 0 or lane['ctest_exit'] != 0 or lane['timed_out'] for lane in execution['lanes'].values()):
+              raise SystemExit('at least one paired test invocation failed; both raw logs are retained')
+          PY
+      - name: Require all tests, validation evidence and unchanged source identities
+        if: always()
+        env:
+          SOURCES_OUTCOME: ${{ steps.sources.outcome }}
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          EXECUTION_OUTCOME: ${{ steps.execution.outcome }}
+        run: |
+          python3 - <<'PY'
+          from collections import Counter
+          import json
+          import math
+          import os
+          from pathlib import Path
+          import re
+          import sys
+
+          sys.path.insert(0, str(Path('tools').resolve()))
+          from required_test_report import report
+
+          names = ['agc_driver_pm4', 'agc_driver_same_queue_label_wait_draw_pipeline', 'agc_completion_label_wait']
+          errors = []
+          lanes = {}
+          vuids = {}
+          def read(path):
+              try:
+                  return json.loads(Path(path).read_text())
+              except (OSError, ValueError) as error:
+                  errors.append(f'{path}: {error}')
+                  return {}
+          identity = read('diagnostics/source-identity.json')
+          execution = read('diagnostics/execution.json')
+          for variable in ('SOURCES_OUTCOME', 'BASELINE_OUTCOME', 'CANDIDATE_OUTCOME', 'EXECUTION_OUTCOME'):
+              if os.environ.get(variable) != 'success':
+                  errors.append(f'{variable}: {os.environ.get(variable)}')
+          if identity.get('baseline_revision') != os.environ['BASELINE_REVISION'] or identity.get('candidate_revision') != os.environ['GITHUB_SHA']:
+              errors.append('source identity does not match the required baseline and event revision')
+          if execution.get('required_tests') != names or execution.get('source_unchanged_after_tests') is not True:
+              errors.append('the exact paired tests or final source verification are missing')
+          environment = execution.get('environment', {})
+          required_environment = {'ANYPS5_REQUIRE_VULKAN': '1', 'ANYPS5_NO_SHADER_CACHE': '1',
+                                  'VK_INSTANCE_LAYERS': 'VK_LAYER_KHRONOS_validation', 'GALLIUM_OVERRIDE_CPU_CAPS': 'avx'}
+          if any(environment.get(key) != value for key, value in required_environment.items()):
+              errors.append('required Vulkan comparison settings are missing from the execution receipt')
+          if not environment.get('VK_DRIVER_FILES') or environment.get('VK_ICD_FILENAMES') != environment['VK_DRIVER_FILES']:
+              errors.append('the execution receipt does not identify one shared lavapipe driver')
+          if set(execution.get('lanes', {})) != {'baseline', 'candidate'}:
+              errors.append('both execution receipts are required')
+          for lane in ('baseline', 'candidate'):
+              receipt = execution.get('lanes', {}).get(lane, {})
+              if receipt.get('revision') != identity.get(f'{lane}_revision') or receipt.get('inventory_exit') != 0 or receipt.get('ctest_exit') != 0 or receipt.get('timed_out') is not False:
+                  errors.append(f'{lane}: failed or missing execution receipt')
+              result = report(Path(f'diagnostics/{lane}-inventory.json'), Path(f'diagnostics/{lane}.xml'), 'ctest', names)
+              lanes[lane] = result
+              errors.extend(f'{lane}: {error}' for error in result['errors'])
+              if result['registered'] != 3 or result['required'] != 3 or result['passed'] != 3 or set(result['tests']) != set(names):
+                  errors.append(f'{lane}: expected exactly three registered, selected and passing tests')
+              for name, case in result['tests'].items():
+                  try:
+                      seconds = float(case.get('seconds'))
+                      if not math.isfinite(seconds) or not 0 <= seconds <= 30:
+                          raise ValueError('outside the required 30-second bound')
+                  except (TypeError, ValueError) as error:
+                      errors.append(f'{lane}: invalid duration for {name}: {error}')
+              try:
+                  log = Path(f'diagnostics/{lane}-ctest.log').read_text()
+              except OSError as error:
+                  errors.append(f'{lane}: {error}')
+                  log = ''
+              if not log.strip():
+                  errors.append(f'{lane}: the verbose test log is empty')
+              if 'was not found but was requested by env var vk_instance_layers' in log.lower() or 'VK_ERROR_LAYER_NOT_PRESENT' in log:
+                  errors.append(f'{lane}: the requested Vulkan validation layer was unavailable')
+              vuids[lane] = Counter(re.findall(r'VUID-[A-Za-z0-9_-]+', log))
+          added = vuids['candidate'] - vuids['baseline']
+          if added:
+              errors.append(f'the candidate added Vulkan validation errors: {dict(added)}')
+          result = {'format_version': 1, 'baseline_revision': identity.get('baseline_revision'),
+                    'candidate_revision': identity.get('candidate_revision'), 'lanes': lanes,
+                    'validation_vuids': {lane: dict(values) for lane, values in vuids.items()},
+                    'new_validation_vuids': dict(added), 'errors': errors,
+                    'scope': 'Linux x86_64 default engine on lavapipe; ARM64 GPU and Apple Metal execution remain unverified'}
+          Path('diagnostics').mkdir(exist_ok=True)
+          Path('diagnostics/paired-vulkan-report.json').write_text(json.dumps(result, indent=2) + '\n')
+          summary = ['### Paired default-engine Vulkan regressions', '', result['scope'], '',
+                     f"Baseline: `{result['baseline_revision']}`; {lanes['baseline']['passed']}/3 required passes.",
+                     f"Candidate: `{result['candidate_revision']}`; {lanes['candidate']['passed']}/3 required passes.",
+                     f'Additional validation-error occurrences: {sum(added.values())}.', '']
+          summary += [f'- {error}' for error in errors] if errors else ['All three tests passed once on each revision, with no skips and no additional VUID errors.']
+          text = '\n'.join(summary) + '\n'
+          Path('diagnostics/paired-vulkan-report.md').write_text(text)
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write(text)
+          raise SystemExit(bool(errors))
+          PY
+      - name: Upload both revisions and raw validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: port-integration-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/
+            build-port/CMakeCache.txt
+            build-port/CMakeFiles/CMakeConfigureLog.yaml
+            build-port/Testing/Temporary/
+            ${{ runner.temp }}/port-integration-baseline/build-port/CMakeCache.txt
+            ${{ runner.temp }}/port-integration-baseline/build-port/CMakeFiles/CMakeConfigureLog.yaml
+            ${{ runner.temp }}/port-integration-baseline/build-port/Testing/Temporary/
+          retention-days: 7
+          if-no-files-found: error

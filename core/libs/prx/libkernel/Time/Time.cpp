@@ -27,7 +27,9 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -51,6 +53,14 @@
 #include <mach/mach.h>
 #include <pthread.h>
 #endif
+
+static std::uint64_t ReadTimestamp() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#else
+    return __builtin_arm_rsr64("cntvct_el0");
+#endif
+}
 
 static constexpr int GUEST_EPERM = 1;
 static constexpr int GUEST_EFAULT = 14;
@@ -886,17 +896,17 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
 }
 
 uint64_t APS5_VABI sceKernelReadTsc(void) {
-    return __rdtsc();
+    return ReadTimestamp();
 }
 
 std::uint64_t APS5_VABI HostTscFrequency_nid_no_patch() {
     static const std::uint64_t frequency = [] {
         const CurrentCpuPin pin;
         const std::uint64_t startNanos = RawMonotonicNanos();
-        const std::uint64_t startTicks = __rdtsc();
+        const std::uint64_t startTicks = ReadTimestamp();
         TimedWait::SleepNanos(20000000ULL);
         const std::uint64_t elapsedNanos = RawMonotonicNanos() - startNanos;
-        const std::uint64_t elapsedTicks = __rdtsc() - startTicks;
+        const std::uint64_t elapsedTicks = ReadTimestamp() - startTicks;
         return static_cast<std::uint64_t>(static_cast<long double>(elapsedTicks) * 1000000000.0L / static_cast<long double>(elapsedNanos));
     }();
     return frequency;

@@ -1,0 +1,560 @@
+name: Native arm64 fixtures
+
+on:
+  push:
+    branches: [main, 'codex/main-integration', 'codex/native-*']
+    paths:
+      - .github/workflows/native-fixtures.yml
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/libs/**
+      - core/relinker/**
+      - tools/translator/**
+      - tools/tests/test_native_fixture_runner.py
+      - tools/tests/test_native_packager.py
+      - tools/tests/test_ffmpeg_fetch.py
+      - tools/macos/fetch_ffmpeg.py
+      - docs/dev/NATIVE_ARM64.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-fixtures-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scalar-references:
+    name: Require scalar x86 references at both optimization levels
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Check out the fixture without submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare the Rosetta reference
+        run: |
+          mkdir -p diagnostics/reference-probe
+          test "$(uname -m)" = arm64
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/reference-probe/rosetta.log
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Record both optimized and unoptimized reference results
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import platform
+          import subprocess
+          from pathlib import Path
+
+          directory = Path("diagnostics/reference-probe").resolve()
+          fixtures = {
+              "cmpxchg-alias": {"source": "cmpxchg_alias.c", "cases": 60, "expected": {"stdout": "ca6fbb61f3358b09", "exit_code": 9}},
+              "lea-address-size": {"source": "lea_address_size.c", "cases": 2800, "expected": {"stdout": "e294d24a144bdbf2", "exit_code": 114}},
+              "leave-operand-size": {"source": "leave_operand_size.c", "cases": 3072, "expected": {"stdout": "aa69bd1b27fa6a0e", "exit_code": 14}},
+          }
+          compiler = Path(subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip())
+          sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["GITHUB_SHA"] or platform.system() != "Darwin" or platform.machine() != "arm64":
+              raise SystemExit("requires the event revision on native arm64 macOS")
+          report = {
+              "schema_version": 1, "revision": revision, "host": platform.platform(), "machine": platform.machine(),
+              "compiler": {"path": str(compiler), "version": subprocess.check_output([compiler, "--version"], text=True)},
+              "execution": "x86_64 under Rosetta", "sdk": sdk, "fixtures": {}, "cases": [],
+          }
+          for name, fixture in fixtures.items():
+              source = Path("tools/translator/tests", fixture["source"]).resolve()
+              report["fixtures"][name] = {"source": {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+                                           "required_cases": fixture["cases"], "expected": fixture["expected"]}
+              for optimization in ("O0", "O1"):
+                  binary = directory / f"{name}-{optimization}"
+                  case = {"fixture": name, "optimization": optimization, "passed": False, "commands": []}
+                  report["cases"].append(case)
+                  for stage, command in (
+                      ("build", [str(compiler), "-isysroot", sdk, "-arch", "x86_64", f"-{optimization}", "-Wall", "-Wextra", "-Werror", "-DMAIN_WRAPPER", str(source), "-o", str(binary)]),
+                      ("run", ["/usr/bin/arch", "-x86_64", str(binary)]),
+                  ):
+                      result = {"stage": stage, "command": command}
+                      case["commands"].append(result)
+                      try:
+                          completed = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=30)
+                      except (OSError, subprocess.TimeoutExpired) as error:
+                          result["error"] = str(error)
+                          break
+                      result.update(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+                      for stream in ("stdout", "stderr"):
+                          (directory / f"{name}-{optimization}-{stage}.{stream}.log").write_text(result[stream], encoding="utf-8")
+                      if stage == "build" and completed.returncode != 0:
+                          break
+                      if stage == "run":
+                          actual = {"stdout": completed.stdout.strip(), "exit_code": completed.returncode}
+                          case["passed"] = actual == fixture["expected"]
+                  (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          required = [(name, optimization) for name in fixtures for optimization in ("O0", "O1")]
+          report["passed"] = [(case["fixture"], case["optimization"]) for case in report["cases"]] == required and all(case["passed"] for case in report["cases"])
+          (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          raise SystemExit(not report["passed"])
+          PY
+      - name: Upload scalar reference diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-scalar-references-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/reference-probe/
+          retention-days: 7
+          if-no-files-found: error
+  native-fixtures:
+    name: Required native arm64 CPU fixtures
+    needs: scalar-references
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      BASELINE_REVISION: 795aa430be2bbb60054c0ad2e0a0812c81f91318
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      REQUIRED_CTESTS: '^native_(fixture_reporting|translator_cli|ffmpeg_fetch|packager)$'
+    steps:
+      - name: Check out tested revision and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          submodules: recursive
+          persist-credentials: false
+      - name: Record source and native host identity
+        run: |
+          mkdir -p diagnostics/native
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            sw_vers
+            uname -a
+            sysctl hw.model hw.memsize hw.ncpu machdep.cpu.brand_string
+            xcodebuild -version
+            xcrun clang --version
+            xcrun --sdk macosx --show-sdk-path
+            cmake --version
+            python3 --version
+            printf 'Build cache: none restored\nCoverage: seven native CPU fixtures, Rosetta references and the AMD integer model; no game or GPU validation\n'
+          } 2>&1 | tee diagnostics/identity.txt
+          python3 - <<'PY'
+          import json
+          import os
+          import platform
+          import subprocess
+          from pathlib import Path
+
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          data = {
+              "revision": revision, "event_revision": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "repository": os.environ["GITHUB_REPOSITORY"], "host": platform.platform(),
+              "machine": platform.machine(), "python": platform.python_version(),
+              "submodules": subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True),
+          }
+          Path("diagnostics/source.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          if revision != data["event_revision"] or platform.system() != "Darwin" or platform.machine() != "arm64":
+              raise SystemExit("requires the event revision and a native arm64 Python process on macOS")
+          PY
+          test "$(uname -m)" = arm64
+      - name: Install the documented LLVM toolchain and Rosetta reference
+        timeout-minutes: 20
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          brew install llvm@22 lld@22 capstone ninja 2>&1 | tee diagnostics/homebrew.log
+          printf 'ANYPS5_LLVM_BIN=%s/bin\n' "$(brew --prefix llvm@22)" >> "$GITHUB_ENV"
+          printf 'SDKROOT=%s\n' "$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$(brew --prefix lld@22)" >> "$GITHUB_PATH"
+          brew info --json=v2 llvm@22 lld@22 capstone ninja > diagnostics/homebrew.json
+          arch -x86_64 uname -m | tee diagnostics/reference-architecture.txt
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Configure the native translator and runtime
+        run: |
+          {
+            "$ANYPS5_LLVM_BIN/clang" --version
+            "$ANYPS5_LLVM_BIN/clang++" --version
+            "$ANYPS5_LLVM_BIN/llvm-nm" --version
+            "$ANYPS5_LLVM_BIN/llvm-objcopy" --version
+            ld.lld --version
+            clang++ --version
+            ninja --version
+          } 2>&1 | tee diagnostics/toolchain.txt
+          cmake -S tools/translator -B build-translator -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DANYPS5_USE_SYSTEM_DEPS=ON \
+            -DPython3_EXECUTABLE="$(command -v python3)" \
+            -DLLVM_DIR="$(brew --prefix llvm@22)/lib/cmake/llvm" \
+            -DCAPSTONE_INCLUDE_DIR="$(brew --prefix capstone)/include" \
+            -DCAPSTONE_LIBRARY="$(brew --prefix capstone)/lib/libcapstone.a" 2>&1 | tee diagnostics/translator-configure.log
+          ctest --test-dir build-translator --show-only=json-v1 --no-tests=error > diagnostics/ctest-inventory.json
+      - name: Build and identify native translation binaries
+        timeout-minutes: 20
+        run: |
+          cmake --build build-translator --target aps5-translator aps5-translator-runtime --parallel 2 2>&1 | tee diagnostics/translator-build.log
+          file build-translator/aps5-translator build-translator/libaps5-translator-runtime.a | tee diagnostics/translator-binaries.txt
+          lipo build-translator/aps5-translator -verify_arch arm64
+          lipo build-translator/libaps5-translator-runtime.a -verify_arch arm64
+          build-translator/aps5-translator --build-info --cpu apple-m1 | tee diagnostics/translator-build-info.json
+      - name: Run all four required translator CTests
+        run: |
+          ctest --test-dir build-translator -R "$REQUIRED_CTESTS" --output-on-failure \
+            --timeout 30 --parallel 2 --no-tests=error \
+            --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Acquire the pinned FFmpeg package with content verification
+        timeout-minutes: 6
+        run: |
+          python3 tools/macos/fetch_ffmpeg.py --architecture arm64 \
+            --destination "$RUNNER_TEMP/ffmpeg-arm64" --report diagnostics/ffmpeg-acquisition.json \
+            2>&1 | tee diagnostics/ffmpeg-acquisition.log
+      - name: Build only the patched native libc fixture dependency
+        timeout-minutes: 25
+        run: |
+          cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DFFMPEG_PREBUILT_DIR:PATH="$RUNNER_TEMP/ffmpeg-arm64" 2>&1 | tee diagnostics/libc-configure.log
+          python3 -c 'import pathlib, sys; assert sys.argv[2] in pathlib.Path(sys.argv[1]).read_text().splitlines()' \
+            build-arm64/CMakeCache.txt "FFMPEG_PREBUILT_DIR:PATH=$RUNNER_TEMP/ffmpeg-arm64"
+          cmake --build build-arm64 --target core/libs/libs/libc.prx --parallel 2 2>&1 | tee diagnostics/libc-build.log
+          file build-arm64/core/libs/libs/libc.prx | tee diagnostics/libc-binary.txt
+          lipo build-arm64/core/libs/libs/libc.prx -verify_arch arm64
+          shasum -a 256 build-translator/aps5-translator build-translator/libaps5-translator-runtime.a \
+            build-arm64/core/libs/libs/libc.prx > diagnostics/binary-sha256.txt
+      - name: Build the isolated baseline translator with the shared runtime
+        timeout-minutes: 20
+        run: |
+          git -c submodule.recurse=false worktree add --detach "$RUNNER_TEMP/native-baseline" "$BASELINE_REVISION"
+          test "$(git -C "$RUNNER_TEMP/native-baseline" rev-parse HEAD)" = "$BASELINE_REVISION"
+          test -z "$(git -C "$RUNNER_TEMP/native-baseline" status --porcelain --untracked-files=no)"
+          cmake -S "$RUNNER_TEMP/native-baseline/tools/translator" -B build-translator-baseline -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DLLVM_DIR="$(brew --prefix llvm@22)/lib/cmake/llvm" \
+            -DCAPSTONE_INCLUDE_DIR="$(brew --prefix capstone)/include" \
+            -DCAPSTONE_LIBRARY="$(brew --prefix capstone)/lib/libcapstone.a" 2>&1 | tee diagnostics/baseline-configure.log
+          cmake --build build-translator-baseline --target aps5-translator --parallel 2 2>&1 | tee diagnostics/baseline-build.log
+          cp build-translator/libaps5-translator-runtime.a build-translator-baseline/libaps5-translator-runtime.a
+          cmp build-translator/libaps5-translator-runtime.a build-translator-baseline/libaps5-translator-runtime.a
+          lipo build-translator-baseline/aps5-translator -verify_arch arm64
+          build-translator-baseline/aps5-translator --build-info --cpu apple-m1 | tee diagnostics/baseline-build-info.json
+          git diff "$BASELINE_REVISION" -- tools/translator/src/Lifter.cpp > diagnostics/lifter.patch
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def identity(path):
+              path = path.resolve()
+              return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+          baseline = Path(os.environ["RUNNER_TEMP"]) / "native-baseline"
+          data = {
+              "baseline_revision": subprocess.check_output(["git", "-C", str(baseline), "rev-parse", "HEAD"], text=True).strip(),
+              "candidate_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "baseline_lifter": identity(baseline / "tools/translator/src/Lifter.cpp"),
+              "candidate_lifter": identity(Path("tools/translator/src/Lifter.cpp")),
+              "baseline_translator": identity(Path("build-translator-baseline/aps5-translator")),
+              "candidate_translator": identity(Path("build-translator/aps5-translator")),
+          }
+          Path("diagnostics/baseline-source.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          if data["baseline_revision"] != os.environ["BASELINE_REVISION"] or data["candidate_revision"] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("baseline and candidate source identities must match their selected revisions")
+          PY
+      - name: Require the baseline LEAVE operand-size mismatch with the current fixtures
+        timeout-minutes: 5
+        run: |
+          python3 - <<'PY' 2>&1 | tee diagnostics/baseline-check.log
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          errors = []
+          required = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size", "leave-operand-size"]
+          failures = {"leave-operand-size": "leave operand-size mismatch"}
+          report_path = Path("diagnostics/native-baseline/report.json")
+          command = [sys.executable, "tools/translator/tests/run_native_fixtures.py", "build-translator-baseline",
+                     "build-arm64/core/libs/libs", "diagnostics/native-baseline", "--cpu", "apple-m1", "--report", str(report_path)]
+          returncode = None
+          report_digest = None
+
+          def require(condition, message):
+              if not condition:
+                  errors.append(message)
+
+          try:
+              with Path("diagnostics/baseline-fixtures.log").open("wb") as stream:
+                  completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=180)
+              returncode = completed.returncode
+              require(returncode == 1, f"baseline runner must exit normally with 1, got {returncode}")
+              report = json.loads(report_path.read_text())
+              report_digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
+              require(report["schema_version"] == 1 and report["suite"] == "native-arm64", "unsupported baseline report schema")
+              require(report["required_fixtures"] == required and [case["name"] for case in report["fixtures"]] == required, "baseline fixture inventory is incomplete")
+              require(report["complete"] is True and report["passed"] is False and report["counts"] == {"required": 7, "pass": 6, "fail": 1, "skip": 0}, "baseline must report six passes and one failure without skips")
+              for case in report["fixtures"]:
+                  require(case["required"] is True, f"baseline fixture is not required: {case['name']}")
+                  require(case["stage"] == "compare" and case["status"] == ("fail" if case["name"] in failures else "pass"), f"unexpected baseline outcome: {case['name']}")
+              work = Path(report["work"]).resolve()
+              require(work.is_relative_to(report_path.parent.resolve()), "baseline evidence is outside its artifact directory")
+              for case in report["fixtures"]:
+                  name = case["name"]
+                  if name in failures:
+                      require(case["actual"] == {"exit_code": 1, "stdout": failures[name]}, f"baseline failed for a different reason: {name}")
+                  else:
+                      require(case["actual"] == case["expected"], f"baseline passing result differs from its reference: {name}")
+                  checksum = case["expected"]["stdout"]
+                  stages = ["translate", "native-link", "native-run"]
+                  if name in ("vector-smoke", "cmpxchg-alias", "lea-address-size", "leave-operand-size"):
+                      require(re.fullmatch(r"[0-9a-f]{16}", checksum) is not None and case["expected"]["exit_code"] == (int(checksum, 16) & 0x7f), f"baseline reference checksum is invalid: {name}")
+                      stages = ["reference-build", "reference-run", *stages]
+                  if name == "lea-address-size":
+                      require(case["expected"] == {"exit_code": 114, "stdout": "e294d24a144bdbf2"}, "baseline LEA reference differs from the hardware-checked expectation")
+                  if name == "leave-operand-size":
+                      require(case["expected"] == {"exit_code": 14, "stdout": "aa69bd1b27fa6a0e"}, "baseline LEAVE reference differs from the hardware-checked expectation")
+                  if name == "cmpxchg-amd-register":
+                      stages = ["reference-model", *stages]
+                  require([entry["stage"] for entry in case["commands"]] == stages, f"baseline mismatch lacks completed build, reference or run stages: {name}")
+                  for entry in case["commands"]:
+                      expected_exit = case["actual"]["exit_code"] if entry["stage"] == "native-run" else case["expected"]["exit_code"] if entry["stage"] == "reference-run" else 0
+                      require(type(entry["returncode"]) is int and entry["returncode"] == expected_exit and "error" not in entry, f"baseline command failed unexpectedly: {name}/{entry['stage']}")
+                      for channel in ("stdout", "stderr"):
+                          log = Path(entry[channel]).resolve()
+                          require(log.is_relative_to(work) and log.is_file(), f"missing baseline {name}/{entry['stage']} {channel} log")
+                      if entry["stage"] in ("reference-run", "native-run"):
+                          expected_output = case["actual"]["stdout"] if entry["stage"] == "native-run" else checksum
+                          require(Path(entry["stdout"]).read_text().strip() == expected_output, f"baseline output does not match its retained log: {name}/{entry['stage']}")
+                      if entry["stage"] == "reference-model":
+                          model = json.loads(Path(entry["stdout"]).read_text())
+                          require(type(model["schema_version"]) is int and model == {"schema_version": 1, "contract": "AMD64 CMPXCHG conditional register writes", "cases": 576,
+                                                                                   "expected": {"exit_code": 118, "stdout": "475cd741284f3476"}}, "baseline AMD model evidence is invalid")
+                          require(case["expected"] == {"exit_code": 118, "stdout": "475cd741284f3476"}, "baseline AMD expectation differs from the model")
+          except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.TimeoutExpired) as error:
+              errors.append(f"baseline execution or evidence: {error}")
+
+          result = {"baseline_revision": os.environ["BASELINE_REVISION"], "candidate_revision": os.environ["GITHUB_SHA"],
+                    "command": command, "returncode": returncode, "report_sha256": report_digest,
+                    "expected_failures": failures, "expected_failure_reproduced": not errors, "errors": errors}
+          Path("diagnostics/baseline-comparison.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(result, indent=2))
+          raise SystemExit(bool(errors))
+          PY
+      - name: Execute all seven required native fixtures and their references
+        timeout-minutes: 10
+        run: |
+          python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm64/core/libs/libs \
+            diagnostics/native --cpu apple-m1 --report diagnostics/native/report.json 2>&1 | tee diagnostics/native.log
+      - name: Require complete test and fixture evidence
+        if: always()
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY' 2>&1 | tee diagnostics/gate.log
+          import hashlib
+          import json
+          import os
+          import re
+          import struct
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          errors = []
+          required_ctests = {"native_fixture_reporting": 27, "native_translator_cli": 4, "native_ffmpeg_fetch": 21, "native_packager": 11}
+          required_fixtures = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size", "leave-operand-size"]
+          failures = {"leave-operand-size": "leave operand-size mismatch"}
+
+          def require(condition, message):
+              if not condition:
+                  errors.append(message)
+
+          def verify_file(identity, expected):
+              path = Path(identity["path"])
+              require(path.resolve() == expected.resolve(), f"unexpected input path: {path}")
+              require(identity["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest(), f"file digest mismatch: {path}")
+
+          def verify_run(report, build, artifact_directory, baseline=False):
+              label = "baseline" if baseline else "candidate"
+              require(type(report["schema_version"]) is int and report["schema_version"] == 1 and report["suite"] == "native-arm64", f"unsupported {label} report schema")
+              require(report["required_fixtures"] == required_fixtures and [case["name"] for case in report["fixtures"]] == required_fixtures, f"{label} fixture inventory is incomplete")
+              expected_counts = {"required": 7, "pass": 6 if baseline else 7, "fail": 1 if baseline else 0, "skip": 0}
+              require(report["complete"] is True and report["passed"] is (not baseline) and report["counts"] == expected_counts and all(type(value) is int for value in report["counts"].values()), f"unexpected {label} fixture counts")
+              provenance = report["provenance"]
+              require(provenance["host"]["system"] == "Darwin" and provenance["host"]["machine"] == "arm64" and provenance["requested_cpu"] == "apple-m1", f"{label} host or CPU is incorrect")
+              info = provenance["translator"]["build_info"]
+              require(type(info["schema_version"]) is int and info["schema_version"] == 1 and info["target_cpu"] == "apple-m1" and info["target_triple"] == "arm64-apple-macosx13.0.0" and info["optimization"] == "O2" and re.match(r"^22\.", info["llvm_version"]), f"{label} translator does not match the required toolchain")
+              for name, path in {
+                  "translator": build / "aps5-translator",
+                  "runtime": build / "libaps5-translator-runtime.a",
+                  "libc": Path("build-arm64/core/libs/libs/libc.prx"),
+                  "runner": Path("tools/translator/tests/run_native_fixtures.py"),
+                  "guesttools": Path("core/relinker/relinker/tests/macos/guesttools.py"),
+              }.items():
+                  verify_file(provenance[name], path)
+              for name in ("guest_clang", "guest_clangxx", "llvm_nm", "llvm_objcopy", "guest_linker", "native_linker", "reference_arch", "reference_python"):
+                  tool = provenance["tools"][name]
+                  require(tool["available"] is True and Path(tool["path"]).is_file() and (name == "reference_arch" or bool(tool["version"])), f"{label} required tool did not run: {name}")
+              sources = {"import": "core/relinker/relinker/tests/macos/import_fixture.py", "lifter-smoke": "tools/translator/tests/lifter_smoke.c",
+                         "vector-smoke": "tools/translator/tests/vector_smoke.c", "cmpxchg-alias": "tools/translator/tests/cmpxchg_alias.c",
+                         "cmpxchg-amd-register": "tools/translator/tests/cmpxchg_alias.c", "lea-address-size": "tools/translator/tests/lea_address_size.c",
+                         "leave-operand-size": "tools/translator/tests/leave_operand_size.c"}
+              reference_flags = {"vector-smoke": ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt", "-fno-inline"], "cmpxchg-alias": [], "lea-address-size": [], "leave-operand-size": []}
+              work = Path(report["work"]).resolve()
+              require(work.is_relative_to(artifact_directory.resolve()), f"{label} evidence is outside its artifact directory")
+              for case in report["fixtures"]:
+                  name = case["name"]
+                  regression = baseline and name in failures
+                  require(case["required"] is True and case["status"] == ("fail" if regression else "pass") and case["stage"] == "compare", f"unexpected {label} fixture outcome: {name}")
+                  if regression:
+                      require(case["actual"] == {"exit_code": 1, "stdout": failures[name]}, f"baseline failed for a different reason: {name}")
+                  else:
+                      require(case["actual"] == case["expected"], f"{label} result differs from its reference: {name}")
+                  verify_file(case["source"], Path(sources[name]))
+                  if name != "import":
+                      flags = ["-DCMPXCHG_AMD_REGISTERS"] if name == "cmpxchg-amd-register" else ["-fno-inline"] if name == "lifter-smoke" else reference_flags.get(name, [])
+                      require(case["compile_flags"] == flags, f"unexpected {label} guest compile options: {name}")
+                  stages = ["translate", "native-link", "native-run"]
+                  if name in reference_flags:
+                      stages = ["reference-build", "reference-run", *stages]
+                      require(case["reference"] == {"execution": "x86_64 under Rosetta", "optimization": "O0", "flags": reference_flags[name]}, f"unexpected {label} reference options: {name}")
+                      checksum = case["expected"]["stdout"]
+                      require(re.fullmatch(r"[0-9a-f]{16}", checksum) is not None and type(case["expected"]["exit_code"]) is int and case["expected"]["exit_code"] == (int(checksum, 16) & 0x7f), f"invalid {label} reference checksum: {name}")
+                  if name == "lea-address-size":
+                      require(case["expected"] == {"exit_code": 114, "stdout": "e294d24a144bdbf2"}, f"unexpected {label} LEA reference result")
+                  if name == "leave-operand-size":
+                      require(case["expected"] == {"exit_code": 14, "stdout": "aa69bd1b27fa6a0e"}, f"unexpected {label} LEAVE reference result")
+                  if name == "cmpxchg-amd-register":
+                      stages = ["reference-model", *stages]
+                      reference = case["reference"]
+                      require(reference["execution"] == "native Python integer model" and reference["contract"] == "AMD64 CMPXCHG conditional register writes" and type(reference["cases"]) is int and reference["cases"] == 576, f"unexpected {label} AMD model contract")
+                      verify_file(reference["source"], Path("tools/translator/tests/cmpxchg_amd_model.py"))
+                      require(case["expected"] == {"exit_code": 118, "stdout": "475cd741284f3476"}, f"unexpected {label} AMD model result")
+                  require([entry["stage"] for entry in case["commands"]] == stages, f"missing {label} fixture command evidence: {name}")
+                  for entry in case["commands"]:
+                      expected_exit = case["actual"]["exit_code"] if entry["stage"] == "native-run" else case["expected"]["exit_code"] if entry["stage"] == "reference-run" else 0
+                      require(type(entry["returncode"]) is int and entry["returncode"] == expected_exit and "error" not in entry, f"{label} command failed: {name}/{entry['stage']}")
+                      for stream in ("stdout", "stderr"):
+                          log = Path(entry[stream]).resolve()
+                          require(log.is_relative_to(work) and log.is_file(), f"missing {label} log: {name}/{entry['stage']}/{stream}")
+                      if entry["stage"] in ("native-run", "reference-run"):
+                          expected_output = case["actual"]["stdout"] if entry["stage"] == "native-run" else case["expected"]["stdout"]
+                          require(Path(entry["stdout"]).read_text().strip() == expected_output, f"{label} output differs from its retained log: {name}/{entry['stage']}")
+                      if entry["stage"] == "reference-model":
+                          require(entry["command"] == [provenance["tools"]["reference_python"]["path"], str(Path("tools/translator/tests/cmpxchg_amd_model.py").resolve())], f"unexpected {label} model invocation")
+                          model = json.loads(Path(entry["stdout"]).read_text())
+                          require(type(model["schema_version"]) is int and model == {"schema_version": 1, "contract": "AMD64 CMPXCHG conditional register writes", "cases": 576, "expected": case["expected"]}, f"invalid {label} model execution evidence")
+                  executable = work / name / "eboot"
+                  verify_file(case["executable"], executable)
+                  header = executable.read_bytes()[:32]
+                  require(len(header) == 32 and struct.unpack_from("<I", header)[0] == 0xFEEDFACF and struct.unpack_from("<I", header, 4)[0] == 0x0100000C and struct.unpack_from("<I", header, 12)[0] == 2, f"{label} executable is not thin arm64 Mach-O: {name}")
+              return report
+
+          try:
+              inventory = json.loads(Path("diagnostics/ctest-inventory.json").read_text())
+              registered = [test["name"] for test in inventory["tests"]]
+              for name in required_ctests:
+                  require(registered.count(name) == 1, f"required CTest not registered exactly once: {name}")
+              cases = list(ET.parse("diagnostics/ctest.xml").iter("testcase"))
+              require(sorted(case.get("name") for case in cases) == sorted(required_ctests), "CTest results are missing, duplicated or unexpected")
+              for case in cases:
+                  name = case.get("name")
+                  require(case.get("status") == "run" and not any(case.find(tag) is not None for tag in ("failure", "error", "skipped")), f"CTest did not pass: {name}")
+                  output = case.findtext("system-out", default="")
+                  counts = re.findall(r"^Ran ([0-9]+) tests? in .+$", output, re.MULTILINE)
+                  require(len(counts) == 1 and int(counts[0]) >= required_ctests.get(name, sys.maxsize), f"missing required unittest execution count: {name}")
+                  require(re.search(r"^OK\s*$", output, re.MULTILINE) is not None and not re.search(r"^OK \(", output, re.MULTILINE), f"unittest results include skips or incomplete evidence: {name}")
+          except (OSError, ValueError, TypeError, KeyError, ET.ParseError) as error:
+              errors.append(f"CTest evidence: {error}")
+
+          try:
+              acquisition = json.loads(Path("diagnostics/ffmpeg-acquisition.json").read_text())
+              ffmpeg_revision = "9ac4cfd195f192ed8b08566f49c28dbb48d08341"
+              destination = Path(os.environ["RUNNER_TEMP"]) / "ffmpeg-arm64"
+              require(type(acquisition["schema_version"]) is int and acquisition["schema_version"] == 1 and acquisition["passed"] is True and acquisition["stage"] == "complete" and "error" not in acquisition, "FFmpeg acquisition did not complete")
+              require(acquisition["source_revision"] == os.environ["GITHUB_SHA"] and acquisition["revision"] == acquisition["gitlink_revision"] == acquisition["submodule_revision"] == ffmpeg_revision, "FFmpeg source revisions do not match the pinned dependency")
+              require(acquisition["dependency"] == "FFmpeg" and acquisition["architecture"] == "arm64" and Path(acquisition["destination"]).resolve() == destination.resolve(), "FFmpeg package architecture or destination is incorrect")
+              require(acquisition["helper_sha256"] == hashlib.sha256(Path("tools/macos/fetch_ffmpeg.py").read_bytes()).hexdigest(), "FFmpeg acquisition helper identity changed")
+              require(acquisition["asset"] == {"name": "ffmpeg-macos-arm64.zip", "url": f"https://github.com/KytyPS5/ext-ffmpeg-core/releases/download/{ffmpeg_revision[:12]}/ffmpeg-macos-arm64.zip", "asset_id": 567718242, "api_url": "https://api.github.com/repos/KytyPS5/ext-ffmpeg-core/releases/assets/567718242", "sha256": "458933af900b2bf0bf3d4422e3ae1c7aef46f671cd4af99c42ffe99d43ca9170", "size": 13316412}, "FFmpeg asset differs from the verified manifest")
+              attempts = acquisition["attempts"]
+              require(1 <= len(attempts) <= 3 and [entry["number"] for entry in attempts] == list(range(1, len(attempts) + 1)), "FFmpeg acquisition attempts are incomplete")
+              for index, entry in enumerate(attempts):
+                  require(entry["route"] == ("release" if index == 0 else "asset-api") and entry["url"] == acquisition["asset"]["url" if index == 0 else "api_url"] and entry["accept"] == (None if index == 0 else "application/octet-stream"), "FFmpeg acquisition used an unexpected route")
+              require(all(entry.get("transient") is True and "error_type" in entry for entry in attempts[:-1]), "FFmpeg acquisition retried a permanent failure")
+              require(attempts[-1]["http_status"] == 200 and attempts[-1]["bytes"] == acquisition["asset"]["size"] and attempts[-1]["sha256"] == acquisition["asset"]["sha256"] and "error_type" not in attempts[-1], "FFmpeg transfer lacks verified completion evidence")
+              names = [entry["path"] for entry in acquisition["files"]]
+              actual_names = sorted(str(path.relative_to(destination)) for path in destination.rglob("*") if path.is_file())
+              require(len(names) == 155 and len(set(names)) == 155 and sorted(names) == actual_names, "FFmpeg package inventory is incomplete")
+              for entry in acquisition["files"]:
+                  path = destination / entry["path"]
+                  require(path.resolve().is_relative_to(destination.resolve()) and not path.is_symlink() and path.is_file(), "FFmpeg package contains an invalid file")
+                  require(type(entry["size"]) is int and entry["size"] == path.stat().st_size and entry["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest(), f"FFmpeg file identity differs: {entry['path']}")
+              require(f"FFMPEG_PREBUILT_DIR:PATH={destination}" in Path("build-arm64/CMakeCache.txt").read_text().splitlines(), "CMake did not select the verified FFmpeg package")
+          except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
+              errors.append(f"FFmpeg acquisition evidence: {error}")
+
+          try:
+              source = json.loads(Path("diagnostics/source.json").read_text())
+              require(source["revision"] == source["event_revision"] == os.environ["GITHUB_SHA"], "source revision does not match this run")
+              candidate = verify_run(json.loads(Path("diagnostics/native/report.json").read_text()), Path("build-translator"), Path("diagnostics/native"))
+              baseline_path = Path("diagnostics/native-baseline/report.json")
+              baseline = verify_run(json.loads(baseline_path.read_text()), Path("build-translator-baseline"), Path("diagnostics/native-baseline"), baseline=True)
+              comparison = json.loads(Path("diagnostics/baseline-comparison.json").read_text())
+              require(comparison["expected_failure_reproduced"] is True and comparison["errors"] == [] and type(comparison["returncode"]) is int and comparison["returncode"] == 1, "baseline comparison did not reproduce the expected failure")
+              require(comparison["expected_failures"] == failures, "baseline comparison did not require the LEAVE operand-size regression")
+              require(comparison["baseline_revision"] == os.environ["BASELINE_REVISION"] and comparison["candidate_revision"] == os.environ["GITHUB_SHA"], "baseline comparison revisions do not match this run")
+              require(comparison["report_sha256"] == hashlib.sha256(baseline_path.read_bytes()).hexdigest(), "baseline report changed after its expected-failure check")
+              provenance = json.loads(Path("diagnostics/baseline-source.json").read_text())
+              require(provenance["baseline_revision"] == os.environ["BASELINE_REVISION"] and provenance["candidate_revision"] == os.environ["GITHUB_SHA"], "baseline build source revisions do not match this run")
+              verify_file(provenance["baseline_lifter"], Path(os.environ["RUNNER_TEMP"]) / "native-baseline/tools/translator/src/Lifter.cpp")
+              verify_file(provenance["candidate_lifter"], Path("tools/translator/src/Lifter.cpp"))
+              verify_file(provenance["baseline_translator"], Path("build-translator-baseline/aps5-translator"))
+              verify_file(provenance["candidate_translator"], Path("build-translator/aps5-translator"))
+              require(provenance["baseline_lifter"]["sha256"] != provenance["candidate_lifter"]["sha256"], "baseline and candidate lifter sources are identical")
+              for name in ("runtime", "libc", "runner", "guesttools"):
+                  require(baseline["provenance"][name]["sha256"] == candidate["provenance"][name]["sha256"], f"paired runs did not share the same {name}")
+              require(baseline["provenance"]["tools"] == candidate["provenance"]["tools"], "paired runs used different toolchains")
+              require(baseline["provenance"]["translator"]["build_info"] == candidate["provenance"]["translator"]["build_info"], "paired translator target identities differ")
+              for before, after in zip(baseline["fixtures"], candidate["fixtures"]):
+                  require(before["name"] == after["name"] and before["source"]["sha256"] == after["source"]["sha256"], "paired runs used different fixture sources")
+                  require(before["expected"] == after["expected"] and before.get("reference") == after.get("reference"), f"paired reference results differ: {after['name']}")
+                  require(before.get("compile_flags") == after.get("compile_flags"), f"paired guest compile options differ: {after['name']}")
+          except (OSError, ValueError, TypeError, KeyError, struct.error) as error:
+              errors.append(f"native fixture evidence: {error}")
+
+          result = {"revision": os.environ.get("GITHUB_SHA"), "passed": not errors, "required_ctests": list(required_ctests), "required_fixtures": required_fixtures, "errors": errors}
+          Path("diagnostics/gate.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+          summary = f"### Native arm64 fixture gate\n\nRevision: `{result['revision']}`\n\nResult: {'FAIL' if errors else 'PASS'}; required CTests: {len(required_ctests)}; required native fixtures: {len(required_fixtures)}.\n\n"
+          summary += "\n".join(f"- {error}" for error in errors) + "\n\nCoverage: seven native CPU fixtures with x86-64 Rosetta references, the independent AMD integer model and the expected baseline LEAVE operand-size failure. This run does not validate games or GPU behavior.\n"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+              stream.write(summary)
+          print(json.dumps(result, indent=2))
+          raise SystemExit(bool(errors))
+          PY
+      - name: Upload native fixture diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-fixtures-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/
+            build-translator/CMakeCache.txt
+            build-translator/CMakeFiles/CMakeConfigureLog.yaml
+            build-translator/Testing/Temporary/
+            build-translator-baseline/CMakeCache.txt
+            build-translator-baseline/CMakeFiles/CMakeConfigureLog.yaml
+            build-arm64/CMakeCache.txt
+            build-arm64/CMakeFiles/CMakeConfigureLog.yaml
+          retention-days: 7
+          if-no-files-found: error

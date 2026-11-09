@@ -1,3 +1,30 @@
+function(anyps5_configure_translator_system_dependencies target)
+    if(NOT ANYPS5_USE_SYSTEM_DEPS)
+        message(FATAL_ERROR "System translator dependencies require ANYPS5_USE_SYSTEM_DEPS=ON")
+    endif()
+    find_package(LLVM 22 REQUIRED CONFIG)
+    if(NOT LLVM_VERSION_MAJOR EQUAL 22)
+        message(FATAL_ERROR "The native translator requires LLVM 22")
+    endif()
+    find_path(CAPSTONE_INCLUDE_DIR capstone/capstone.h REQUIRED)
+    find_library(CAPSTONE_LIBRARY NAMES libcapstone.a capstone REQUIRED)
+    file(STRINGS "${CAPSTONE_INCLUDE_DIR}/capstone/capstone.h" capstoneVersion
+        REGEX "^#define CS_(API_MAJOR|API_MINOR|VERSION_EXTRA) [0-9]+$")
+    if(NOT "#define CS_API_MAJOR 5" IN_LIST capstoneVersion OR
+       NOT "#define CS_API_MINOR 0" IN_LIST capstoneVersion OR
+       NOT "#define CS_VERSION_EXTRA 9" IN_LIST capstoneVersion)
+        message(FATAL_ERROR "The native translator requires Capstone 5.0.9 headers")
+    endif()
+    llvm_map_components_to_libnames(translatorLlvmLibraries core support passes target transformutils aarch64codegen aarch64desc aarch64info)
+    target_include_directories(${target} SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CAPSTONE_INCLUDE_DIR})
+    target_compile_definitions(${target} PRIVATE ${LLVM_DEFINITIONS})
+    target_link_libraries(${target} PRIVATE ${translatorLlvmLibraries} ${CAPSTONE_LIBRARY})
+endfunction()
+
+if(CMAKE_PROJECT_NAME STREQUAL "Aps5Translator")
+    return()
+endif()
+
 set(ANYPS5_VULKAN_HEADERS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include")
 set(ANYPS5_SPIRV_HEADERS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Headers/include")
 set(ANYPS5_SDL2_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/SDL2/include")

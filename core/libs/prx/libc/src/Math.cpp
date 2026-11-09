@@ -175,7 +175,9 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#if defined(__x86_64__)
 #include <xmmintrin.h>
+#endif
 
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/SonyCrt.hpp"
@@ -302,12 +304,14 @@ float AtanhfLog1p(float x) {
     return kFloat * Ln2High - ((halfSquare - (s * (halfSquare + r) + (kFloat * Ln2Low + c))) - f);
 }
 
+#if defined(__x86_64__)
 static_assert(std::numeric_limits<long double>::digits == 64, "guest long double is the x87 80-bit format");
 
 struct ExtendedParts {
     std::uint64_t mantissa;
     std::uint16_t signExponent;
 };
+#endif
 
 template <typename TValue, typename THypot>
 TValue Hypot3(TValue x, TValue y, TValue z, THypot hypot) {
@@ -326,6 +330,7 @@ TValue Hypot3(TValue x, TValue y, TValue z, THypot hypot) {
     return hypot(x, hypot(y, z));
 }
 
+#if defined(__x86_64__)
 ExtendedParts SplitExtended(long double value) {
     unsigned char bytes[sizeof(long double)];
     std::memcpy(bytes, &value, sizeof(value));
@@ -379,6 +384,7 @@ long double AsinDenominator(long double t) {
     const auto& q = AsinDenominatorCoefficients;
     return 1.0L + t * (q[0] + t * (q[1] + t * (q[2] + t * (q[3] + t * q[4]))));
 }
+#endif
 
 #ifdef __APPLE__
 // FreeBSD lib/msun/src/e_acosf.c. The macOS acosf rounds some results differently (acosf(0.5f) is one ulp low).
@@ -950,7 +956,13 @@ float APS5_VABI scalbnf_nid_postfix(float x, int exponent) {
     errno = saved_errno;
     return result;
 }
-long double APS5_VABI scalbnl_nid_postfix(long double x, int exponent) { return std::scalbn(x, exponent); }
+long double APS5_VABI scalbnl_nid_postfix(long double x, int exponent) {
+#if defined(__x86_64__)
+    return std::scalbn(x, exponent);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 float APS5_VABI significandf_nid_postfix(float x) { return x == 0.0f || !std::isfinite(x) ? x : std::scalbn(x, -std::ilogb(x)); }
 double APS5_VABI significand_nid_postfix(double x) { return x == 0.0 || !std::isfinite(x) ? x : std::scalbn(x, -std::ilogb(x)); }
 double APS5_VABI frexp_nid_postfix(double x, int* exponent) {
@@ -990,12 +1002,24 @@ std::int64_t APS5_VABI lround_nid_postfix(double x) { return RoundToInt64(x); }
 std::int64_t APS5_VABI lroundf_nid_postfix(float x) { return RoundToInt64(x); }
 std::int64_t APS5_VABI llround_nid_postfix(double x) { return RoundToInt64(x); }
 std::int64_t APS5_VABI llroundf_nid_postfix(float x) { return RoundToInt64(x); }
-std::int64_t APS5_VABI llroundl_nid_postfix(long double x) { return RoundToInt64(x); }
+std::int64_t APS5_VABI llroundl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return RoundToInt64(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 int APS5_VABI __isfinitef_nid_postfix(float x) { return std::isfinite(x) ? 1 : 0; }
 int APS5_VABI __isnormal_nid_postfix(double x) { return std::isnormal(x) ? 1 : 0; }
 int APS5_VABI __isnormalf_nid_postfix(float x) { return std::isnormal(x) ? 1 : 0; }
 int APS5_VABI __isinff_nid_postfix(float x) { return std::isinf(x) ? 1 : 0; }
-long double APS5_VABI nearbyintl_nid_postfix(long double x) { return std::nearbyint(x); }
+long double APS5_VABI nearbyintl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::nearbyint(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 double APS5_VABI cbrt_nid_postfix(double x) {
     const std::uint32_t B1 = 715094163;
@@ -1143,7 +1167,13 @@ double APS5_VABI sqrt_nid_postfix(double x) { return std::sqrt(x); }
 float APS5_VABI sqrtf_nid_postfix(float x) { return std::sqrt(x); }
 double APS5_VABI fabs_nid_postfix(double x) { return std::fabs(x); }
 float APS5_VABI fabsf_nid_postfix(float x) { return std::fabs(x); }
-long double APS5_VABI fabsl_nid_postfix(long double x) { return std::fabs(x); }
+long double APS5_VABI fabsl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::fabs(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 double APS5_VABI copysign_nid_postfix(double x, double y) {
     return std::copysign(x, y);
 }
@@ -1159,10 +1189,22 @@ double APS5_VABI fma_nid_postfix(double x, double y, double z) { return std::fma
 float APS5_VABI fmaf_nid_postfix(float x, float y, float z) { return std::fma(x, y, z); }
 double APS5_VABI fmin_nid_postfix(double x, double y) { return GuestFmin(x, y); }
 float APS5_VABI fminf_nid_postfix(float x, float y) { return GuestFmin(x, y); }
-long double APS5_VABI fminl_nid_postfix(long double x, long double y) { return GuestFmin(x, y); }
+long double APS5_VABI fminl_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
+    return GuestFmin(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 double APS5_VABI fmax_nid_postfix(double x, double y) { return GuestFmax(x, y); }
 float APS5_VABI fmaxf_nid_postfix(float x, float y) { return GuestFmax(x, y); }
-long double APS5_VABI fmaxl_nid_postfix(long double x, long double y) { return GuestFmax(x, y); }
+long double APS5_VABI fmaxl_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
+    return GuestFmax(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 double APS5_VABI fdim_nid_postfix(double x, double y) {
     if (std::isnan(x) || std::isnan(y)) return std::fdim(x, y);
     const double difference = x - y;
@@ -1185,6 +1227,7 @@ float APS5_VABI fdimf_nid_postfix(float x, float y) {
  */
 /* Adapted from FreeBSD release/11.4.0 lib/msun/src/e_acosl.c: https://github.com/freebsd/freebsd-src/blob/release/11.4.0/lib/msun/src/e_acosl.c */
 long double APS5_VABI acosl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     const ExtendedParts parts = SplitExtended(x);
     const int exponent = parts.signExponent & 0x7fff;
     const bool negative = (parts.signExponent & 0x8000) != 0;
@@ -1212,12 +1255,40 @@ long double APS5_VABI acosl_nid_postfix(long double x) {
     const long double correction = (z - high * high) / (s + high);
     const long double r = AsinNumerator(z) / AsinDenominator(z);
     return 2.0L * (high + (r * s + correction));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
-long double APS5_VABI acoshl_nid_postfix(long double x) { return std::acosh(x); }
-long double APS5_VABI asinhl_nid_postfix(long double x) { return std::asinh(x); }
-long double APS5_VABI atanhl_nid_postfix(long double x) { return std::atanh(x); }
-long double APS5_VABI atan2l_nid_postfix(long double y, long double x) { return std::atan2(y, x); }
+long double APS5_VABI acoshl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::acosh(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI asinhl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::asinh(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI atanhl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::atanh(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI atan2l_nid_postfix(long double y, long double x) {
+#if defined(__x86_64__)
+    return std::atan2(y, x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 long double APS5_VABI cbrtl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     constexpr std::uint32_t B1 = 709958130;
     constexpr int Bias = 0x3fff;
     ExtendedParts parts = SplitExtended(x);
@@ -1259,22 +1330,77 @@ long double APS5_VABI cbrtl_nid_postfix(long double x) {
     r = (r - t) / ((t + t) + r);
     t = t + t * r;
     return t * scale;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
-long double APS5_VABI erfl_nid_postfix(long double x) { return std::erf(x); }
-long double APS5_VABI erfcl_nid_postfix(long double x) { return std::erfc(x); }
-long double APS5_VABI expm1l_nid_postfix(long double x) { return std::expm1(x); }
-long double APS5_VABI log1pl_nid_postfix(long double x) { return std::log1p(x); }
-long double APS5_VABI log2l_nid_postfix(long double x) { return std::log2(x); }
-long double APS5_VABI lgammal_nid_postfix(long double x) { return std::lgamma(x); }
-long double APS5_VABI tgammal_nid_postfix(long double x) { return std::tgamma(x); }
+long double APS5_VABI erfl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::erf(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI erfcl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::erfc(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI expm1l_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::expm1(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI log1pl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::log1p(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI log2l_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::log2(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI lgammal_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::lgamma(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI tgammal_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::tgamma(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 float APS5_VABI tgammaf_nid_postfix(float x) { return GuestTgammaf(x); }
 long double APS5_VABI hypotl_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
     if (std::isinf(x) || std::isinf(y)) return std::numeric_limits<long double>::infinity();
     return std::hypot(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 float APS5_VABI hypot3f_nid_postfix(float x, float y, float z) { return Hypot3(x, y, z, hypotf_nid_postfix); }
 double APS5_VABI hypot3_nid_postfix(double x, double y, double z) { return Hypot3(x, y, z, hypot_nid_postfix); }
-long double APS5_VABI hypot3l_nid_postfix(long double x, long double y, long double z) { return Hypot3(x, y, z, hypotl_nid_postfix); }
+long double APS5_VABI hypot3l_nid_postfix(long double x, long double y, long double z) {
+#if defined(__x86_64__)
+    return Hypot3(x, y, z, hypotl_nid_postfix);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 float APS5_VABI j0f_nid_postfix(float x) { return static_cast<float>(::j0(x)); }
 float APS5_VABI j1f_nid_postfix(float x) { return static_cast<float>(::j1(x)); }
 float APS5_VABI jnf_nid_postfix(int order, float x) { return static_cast<float>(::jn(order, x)); }
@@ -1283,6 +1409,7 @@ float APS5_VABI y1f_nid_postfix(float x) { return x == 0.0f ? GuestBesselSecondK
 float APS5_VABI ynf_nid_postfix(int order, float x) { return x == 0.0f ? GuestBesselSecondKindZero() : static_cast<float>(::yn(order, x)); }
 
 long double APS5_VABI asinl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     const ExtendedParts parts = SplitExtended(x);
     const int exponent = parts.signExponent & 0x7fff;
     if (exponent >= 0x3fff) {
@@ -1310,11 +1437,18 @@ long double APS5_VABI asinl_nid_postfix(long double x) {
         result = QuarterPiHigh - ((2.0L * s * r - (HalfPiLow - 2.0L * c)) - (QuarterPiHigh - 2.0L * w));
     }
     return (parts.signExponent & 0x8000) != 0 ? -result : result;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI frexpl_nid_postfix(long double x, int* exponent) {
+#if defined(__x86_64__)
     if (!std::isfinite(x)) return x;
     return std::frexp(x, exponent);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 /*
  * ====================================================
@@ -3660,6 +3794,7 @@ float APS5_VABI cbrtf_nid_postfix(float x) {
     T = T * (static_cast<double>(x) + x + r) / (x + r + r);
     return static_cast<float>(T);
 }
+#if defined(__x86_64__)
 static long double PartialRemainder(long double x, long double y, std::uint16_t* status) {
     long double remainder;
     asm("1:\n\tfprem1\n\tfnstsw %%ax\n\ttestw $0x400, %%ax\n\tjnz 1b" : "=t"(remainder), "=a"(*status) : "0"(x), "u"(y));
@@ -3676,12 +3811,17 @@ static int RemquoQuotient(std::uint16_t status, bool negative) {
     const int quotient = ((status >> 8) & 1) << 2 | ((status >> 14) & 1) << 1 | ((status >> 9) & 1);
     return negative ? -quotient : quotient;
 }
+#endif
 
 float APS5_VABI remainderf_nid_postfix(float x, float y) {
+#if defined(__x86_64__)
     std::uint16_t status;
     const long double remainder = PartialRemainder(x, y, &status);
     SetRemainderDomainError(x, y);
     return static_cast<float>(remainder);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 float APS5_VABI nextafterf_nid_postfix(float x, float y) {
     const std::uint32_t ux = std::bit_cast<std::uint32_t>(x);
@@ -3781,8 +3921,12 @@ float APS5_VABI modff_nid_postfix(float x, float* integral) {
     if (exponent >= 150u) {
         *integral = x;
         if (exponent == 0xffu && (bits & 0x7fffffu) != 0) {
+#if defined(__x86_64__)
             volatile int unordered = _mm_ucomieq_ss(_mm_set_ss(x), _mm_setzero_ps());
             (void)unordered;
+#else
+            if ((bits & 0x00400000u) == 0) std::feraiseexcept(FE_INVALID);
+#endif
             return x;
         }
         return zero;
@@ -3841,22 +3985,118 @@ float APS5_VABI tanhf_nid_postfix(float x) {
     }
     return jx >= 0 ? z : -z;
 }
-long double APS5_VABI atanl_nid_postfix(long double x) { return std::atan(x); }
-long double APS5_VABI sinl_nid_postfix(long double x) { return std::sin(x); }
-long double APS5_VABI cosl_nid_postfix(long double x) { return std::cos(x); }
-long double APS5_VABI tanl_nid_postfix(long double x) { return std::tan(x); }
-long double APS5_VABI sinhl_nid_postfix(long double x) { return std::sinh(x); }
-long double APS5_VABI coshl_nid_postfix(long double x) { return std::cosh(x); }
-long double APS5_VABI tanhl_nid_postfix(long double x) { return std::tanh(x); }
-long double APS5_VABI expl_nid_postfix(long double x) { return std::exp(x); }
-long double APS5_VABI exp2l_nid_postfix(long double x) { return std::exp2(x); }
-long double APS5_VABI logl_nid_postfix(long double x) { return std::log(x); }
-long double APS5_VABI log10l_nid_postfix(long double x) { return std::log10(x); }
-long double APS5_VABI powl_nid_postfix(long double base, long double exp) { return std::pow(base, exp); }
-long double APS5_VABI ldexpl_nid_postfix(long double x, int exp) { return std::ldexp(x, exp); }
-long double APS5_VABI truncl_nid_postfix(long double x) { return std::trunc(x); }
-long double APS5_VABI ceill_nid_postfix(long double x) { return std::ceil(x); }
-long double APS5_VABI floorl_nid_postfix(long double x) { return std::floor(x); }
+long double APS5_VABI atanl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::atan(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI sinl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::sin(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI cosl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::cos(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI tanl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::tan(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI sinhl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::sinh(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI coshl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::cosh(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI tanhl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::tanh(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI expl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::exp(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI exp2l_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::exp2(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI logl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::log(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI log10l_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::log10(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI powl_nid_postfix(long double base, long double exp) {
+#if defined(__x86_64__)
+    return std::pow(base, exp);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI ldexpl_nid_postfix(long double x, int exp) {
+#if defined(__x86_64__)
+    return std::ldexp(x, exp);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI truncl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::trunc(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI ceill_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::ceil(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI floorl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::floor(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 double APS5_VABI logb_nid_postfix(double x) {
     const std::uint64_t bits = std::bit_cast<std::uint64_t>(x) & 0x7fffffffffffffffull;
     if (bits == 0) {
@@ -3882,24 +4122,36 @@ int APS5_VABI ilogb_nid_postfix(double x) {
 }
 int APS5_VABI ilogbf_nid_postfix(float x) { return ilogb_nid_postfix(static_cast<double>(x)); }
 double APS5_VABI remainder_nid_postfix(double x, double y) {
+#if defined(__x86_64__)
     std::uint16_t status;
     const long double remainder = PartialRemainder(x, y, &status);
     SetRemainderDomainError(x, y);
     return static_cast<double>(remainder);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 double APS5_VABI remquo_nid_postfix(double x, double y, int* quo) {
+#if defined(__x86_64__)
     std::uint16_t status;
     const long double remainder = PartialRemainder(x, y, &status);
     *quo = RemquoQuotient(status, std::signbit(x) != std::signbit(y));
     SetRemainderDomainError(x, y);
     return static_cast<double>(remainder);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 float APS5_VABI remquof_nid_postfix(float x, float y, int* quo) {
+#if defined(__x86_64__)
     std::uint16_t status;
     const long double remainder = PartialRemainder(x, y, &status);
     *quo = RemquoQuotient(status, std::signbit(x) != std::signbit(y));
     SetRemainderDomainError(x, y);
     return static_cast<float>(remainder);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 float APS5_VABI _FSinh_nid_postfix(float x, float y) { return ScaledHyperbolic(x, y, true); }
 float APS5_VABI _FCosh_nid_postfix(float x, float y) { return ScaledHyperbolic(x, y, false); }
@@ -3951,15 +4203,23 @@ int APS5_VABI isinf_nid_postfix(double x) { return __isinf_nid_postfix(x); }
 int APS5_VABI __fpclassifyf_nid_postfix(float x) { return _FDtest_nid_postfix(&x); }
 int APS5_VABI __signbitf_nid_postfix(float x) { return std::signbit(x) ? 0x8000 : 0; }
 int APS5_VABI __signbitl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     static_assert(sizeof(long double) == 16, "guest long double requires x87 extended precision storage");
     return std::signbit(x) ? 0x8000 : 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 int APS5_VABI __isfinitel_nid_postfix(long double x) {
+#if defined(__x86_64__)
     static_assert(sizeof(long double) == 16 && std::numeric_limits<long double>::digits == 64 && std::numeric_limits<long double>::max_exponent == 16384 && std::endian::native == std::endian::little, "guest long double requires little-endian x87 extended precision storage");
     std::uint16_t exponent;
     std::memcpy(&exponent, reinterpret_cast<const std::uint8_t*>(&x) + 8, sizeof(exponent));
     return (exponent & 0x7fffu) != 0x7fffu;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 struct DinkumwareFloatCharacteristics {
@@ -4041,6 +4301,7 @@ double APS5_VABI _Cosh_nid_postfix(double x, double y) {
 }
 
 long double APS5_VABI _LCosh_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
     if (!std::isfinite(x) || !std::isfinite(y)) return y * std::cosh(x);
     if (y == 0.0L) return std::copysign(0.0L, y);
     constexpr long double Ln2High = 0x1.62e42fefa0000p-1L;
@@ -4059,9 +4320,13 @@ long double APS5_VABI _LCosh_nid_postfix(long double x, long double y) {
     const long double negatedExponent = -exponent;
     const long double reduced = std::fma(negatedExponent, Ln2Low, std::fma(negatedExponent, Ln2High, magnitude));
     return std::scalbn(scale * (0.5L * std::exp(reduced)), scaleExponent + exponent);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI _LSinh_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
     if (!std::isfinite(x) || !std::isfinite(y)) return y * std::sinh(x);
     if (y == 0.0L) {
         const bool negative = std::signbit(x) != std::signbit(y);
@@ -4084,18 +4349,26 @@ long double APS5_VABI _LSinh_nid_postfix(long double x, long double y) {
     const long double negatedExponent = -exponent;
     const long double reduced = std::fma(negatedExponent, Ln2Low, std::fma(negatedExponent, Ln2High, magnitude));
     return sign * std::scalbn(scale * (0.5L * std::exp(reduced)), scaleExponent + exponent);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 int APS5_VABI _Fltrounds_nid_postfix(void) {
+#if defined(__x86_64__)
     std::uint16_t control;
     asm volatile("fnstcw %0" : "=m"(control));
     constexpr std::array<int, 4> Rounding{1, 3, 2, 0};
     return Rounding[(control >> 10u) & 3u];
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 static_assert(sizeof(GuestFloatingPointEnvironment) == 32 && alignof(GuestFloatingPointEnvironment) == 4 && offsetof(GuestFloatingPointEnvironment, mxcsr) == 28);
 
 int APS5_VABI feupdateenv_nid_postfix(const GuestFloatingPointEnvironment* environment) {
+#if defined(__x86_64__)
     if (environment == nullptr) throw std::invalid_argument("feupdateenv: null environment");
     const auto saved = *environment;
     alignas(16) std::array<std::uint32_t, 128> state;
@@ -4115,16 +4388,24 @@ int APS5_VABI feupdateenv_nid_postfix(const GuestFloatingPointEnvironment* envir
     _mm_setcsr(mxcsr);
     asm volatile("fwait");
     return 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 int APS5_VABI fegetenv_nid_postfix(GuestFloatingPointEnvironment* environment) {
+#if defined(__x86_64__)
     if (environment == nullptr) throw std::invalid_argument("fegetenv: null environment");
     asm volatile("fnstenv %0\n\tfldcw %0" : "+m"(*environment));
     environment->mxcsr = _mm_getcsr();
     return 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 int APS5_VABI feholdexcept_nid_postfix(GuestFloatingPointEnvironment* environment) {
+#if defined(__x86_64__)
     if (environment == nullptr) throw std::invalid_argument("feholdexcept: null environment");
     const auto csr = _mm_getcsr();
     asm volatile("fnstenv %0\n\tfnclex" : "=m"(*environment));
@@ -4133,11 +4414,14 @@ int APS5_VABI feholdexcept_nid_postfix(GuestFloatingPointEnvironment* environmen
     environment->mxcsr = csr;
     _mm_setcsr((csr & ~0x3fu) | 0x1f80u);
     return 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 const GuestFloatingPointEnvironment __fe_dfl_env_nid_postfix {0xffff037fu, 0xffff0000u, 0xffffffffu, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}, 0x9fc0u};
 
-union SonyDconst {
+union alignas(16) SonyDconst {
     unsigned short _Word[8];
     float _Float;
     double _Double;
@@ -4158,6 +4442,7 @@ SonyDconst _LNan_nid_postfix {{0, 0, 0, 0xc000, 0x7fff, 0, 0, 0}};
 SonyDconst _LSnan_nid_postfix {{1, 0, 0, 0x8000, 0x7fff, 0, 0, 0}};
 
 int APS5_VABI fesetenv_nid_postfix(const GuestFloatingPointEnvironment* environment) {
+#if defined(__x86_64__)
     if (environment == nullptr) throw std::invalid_argument("fesetenv: null environment");
     alignas(16) std::array<std::uint32_t, 128> state;
     asm volatile("fxsave %0" : "=m"(state));
@@ -4166,5 +4451,8 @@ int APS5_VABI fesetenv_nid_postfix(const GuestFloatingPointEnvironment* environm
     asm volatile("fldenv %0" : : "m"(*environment) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)");
     _mm_setcsr(environment->mxcsr);
     return 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 }

@@ -1102,7 +1102,15 @@ void InstallFaultDelivery() {
 constexpr int HostSignal = SIGUSR1;
 constexpr std::size_t FxsaveRegisterBytes = 416;
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(__x86_64__)
+void FromHost(const mcontext_t&, GuestMcontext&) {
+    NotImplemented_nid_no_patch("guest exception context on arm64");
+}
+
+void ToHost(const GuestMcontext&, mcontext_t&) {
+    NotImplemented_nid_no_patch("guest exception context on arm64");
+}
+#elif defined(__APPLE__)
 // macOS's mcontext_t points at the thread state; __fs starts with two reserved words and then
 // holds the FXSAVE image from __fpu_fcw on.
 void FromHost(const mcontext_t& host, GuestMcontext& m) {

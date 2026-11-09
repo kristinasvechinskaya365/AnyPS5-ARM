@@ -1,22 +1,34 @@
 # AnyPS5-ARM
 
-**Run PS5 games natively on Apple silicon Macs.**
+**A macOS launcher, Rosetta engine and experimental native ARM64 translator for AnyPS5.**
+
+This fork keeps its macOS fixes and optional native translator together on `main`. The universal launcher runs natively on Apple silicon; the default game engine still uses Rosetta 2. The native translator has focused instruction and host-call fixtures, but is not a general replacement for the game engine. Game compatibility and performance need testing on the actual Mac and title.
 
 [Full guide in English and Turkish / Türkçe rehber](docs/user/GUIDE.md)
 
 ## The AnyPS5 app
 
-**AnyPS5.app** is a launcher laid out like the PS5 home screen. Point it at the folder with your game dumps and it does the rest: it finds the games, unlocks (converts) them for the Mac, starts them, and keeps your controls, saves and trophies per game. No Terminal, build or Vulkan SDK needed.
+**AnyPS5.app** is a launcher laid out like the PS5 home screen. Point it at the folder with your game dumps to find games, convert supported dumps for the Mac, launch them, and keep controls, saves and trophies per game. The packaged app includes its engine and Vulkan runtime; installation needs no compiler, Python or Vulkan SDK.
 
 ![The AnyPS5 launcher in action](docs/videos/launcher-preview.webp)
 
 <p align="center"><a href="https://github.com/AnyTogether/AnyPS5-ARM/raw/main/docs/videos/launcher.mp4"><b>▶ Full video with sound</b></a> (1:39, MP4)</p>
 
+### Install this fork
+
+1. Open [macOS installable app builds](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml), select a successful run on `main`, and download its app artifact while signed in to GitHub. If the artifact has expired, select **Run workflow** on `main` to rebuild it.
+2. Extract the artifact. Keep `install.sh`, `AnyPS5-macOS.zip` and `SHA256SUMS` in the same folder.
+3. Open Terminal in that folder and run:
+
 ```sh
-curl -fsSL https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/install.sh | sh
+sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS --open
 ```
 
-One line installs it into Applications (and Rosetta 2 if it is missing). A download through `curl` carries no quarantine flag, so macOS opens the app without any "cannot be opened" warning. [⬇ Or download the zip](https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip) · [How to use it](docs/user/GUIDE.md#the-anyps5-app)
+The installer verifies the archive, architecture, code signature and required macOS version before replacing `~/Applications/AnyPS5.app`. It preserves the previous app if placement fails. The minimum macOS version comes from the actual packaged binaries, with a floor of macOS 14; an individual build may require a newer version. The current build gates use macOS 26.
+
+These CI packages are signed ad hoc, without Apple notarization. The installer preserves download quarantine. If macOS blocks a package you have verified and trust, follow [Apple's instructions](https://support.apple.com/en-us/102445) for **System Settings → Privacy & Security → Open Anyway**. The default game engine needs Rosetta on Apple silicon; if it is missing, the installer explains how to install it with `softwareupdate --install-rosetta` and Apple's prompts.
+
+App artifacts are retained for 90 days. The fork's release updater never falls back to an upstream app, and automatic updates still require a trusted release signature. [Installation details](docs/dev/MACOS_PORT.md#installing-a-packaged-app) · [How to use the launcher](docs/user/GUIDE.md#the-anyps5-app)
 
 **On Windows or Linux?** Use [**AnyPS5 Desktop**](https://github.com/AnyTogether/AnyPS5-Desktop/releases/latest): this launcher for those systems, with AnyTogether built in (early preview).
 
@@ -326,7 +338,7 @@ Per-game status and test reports live in the [Game bring-up](https://github.com/
 
 AnyPS5-ARM is the macOS port of [AnyPS5](https://github.com/boykopovar/AnyPS5). AnyPS5 is not an emulator: its relinker turns a PS5 executable into a native program, and its system libraries are reimplemented as ordinary shared libraries the program links against. On Apple silicon:
 
-- **CPU:** the game's x86-64 code runs under **Rosetta 2**. A [native arm64 mode](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md) without Rosetta is in development on the `native-arm64` branch.
+- **CPU:** the default engine runs the game's x86-64 code under **Rosetta 2**. The optional [native ARM64 translator](docs/dev/NATIVE_ARM64.md) is included on `main`; its current fixtures do not establish commercial-title compatibility.
 - **Executable:** the relinker writes a **Mach-O** executable.
 - **Graphics:** the PS5 graphics driver runs on **Vulkan through MoltenVK**, which runs on Metal.
 - **Distribution:** the result is a normal **`.app`** you open from Finder.
@@ -337,15 +349,13 @@ Built on [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) and the commu
 
 ## Branches
 
-Each branch is its own project, with its own README:
+Installable builds and ongoing integration use this fork's `main`:
 
 | Branch | What it holds |
 |---|---|
-| [`main`](https://github.com/AnyTogether/AnyPS5-ARM/tree/main) | The whole project: the engine, the launcher and the phone app. Releases are made from it. |
-| [`launcher`](https://github.com/AnyTogether/AnyPS5-ARM/tree/launcher) | The launcher (AnyPS5.app) only. |
-| [`mobile-controller`](https://github.com/AnyTogether/AnyPS5-ARM/tree/mobile-controller) | The phone app (AnyPS5 Remote) only. |
-| [`rosetta`](https://github.com/AnyTogether/AnyPS5-ARM/tree/rosetta) | The engine only, the way it runs today: x86-64 code under Rosetta 2. |
-| [`native-arm64`](https://github.com/AnyTogether/AnyPS5-ARM/tree/native-arm64) | The engine running games as native arm64 code, without Rosetta (experimental). |
+| [`main`](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/tree/main) | The combined launcher, default Rosetta engine, phone sources and optional native translator. Use this branch for builds. |
+| [`codex/macos-portability`](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/tree/codex/macos-portability) | Preserved history of the macOS portability fixes imported into `main`. |
+| [`codex/native-compatibility`](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/tree/codex/native-compatibility) | Preserved history of the native translator fixes reconciled with the newer runtime on `main`. |
 
 ## Credits
 

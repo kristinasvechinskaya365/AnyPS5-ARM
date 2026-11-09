@@ -103,6 +103,7 @@ for size in 16 32 128 256 512; do
     sips -z $((size * 2)) $((size * 2)) "$scratch/icon.png" --out "$scratch/AppIcon.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$scratch/AppIcon.iconset" -o "$app/Contents/Resources/AppIcon.icns"
+minimum="$(python3 "$root/tools/macos/bundle_minimum.py" "$app")"
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -119,7 +120,7 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleVersion</key><string>$version</string>
     <key>AnyPS5Repository</key><string>$repository</string>
     <key>AnyPS5Commit</key><string>$revision</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSMinimumSystemVersion</key><string>$minimum</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>

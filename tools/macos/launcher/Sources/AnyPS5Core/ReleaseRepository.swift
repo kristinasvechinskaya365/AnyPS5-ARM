@@ -8,7 +8,7 @@ public struct ReleaseRepository: Equatable, Sendable {
     public init?(_ name: String) {
         let parts = name.split(separator: "/", omittingEmptySubsequences: false)
         let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-".utf8)
-        guard parts.count == 2, parts.allSatisfy({ part in
+        guard parts.count == 2, parts[0].utf8.count <= 39, parts[1].utf8.count <= 100, parts.allSatisfy({ part in
             !part.isEmpty && part != "." && part != ".." && part.utf8.allSatisfy(allowed.contains)
         }) else { return nil }
         self.name = name
@@ -20,6 +20,12 @@ public struct ReleaseRepository: Equatable, Sendable {
         return ReleaseRepository(name)
     }
 
+    public static func support(in bundle: Bundle = .main) -> ReleaseRepository {
+        configured(in: bundle) ?? ReleaseRepository(defaultName)!
+    }
+
+    public var pageURL: URL { URL(string: "https://github.com/\(name)")! }
+    public var macOSBuildGuideURL: URL { pageURL.appendingPathComponent("blob/main/docs/dev/MACOS_PORT.md") }
     public var latestURL: URL { URL(string: "https://api.github.com/repos/\(name)/releases/latest")! }
     public var releasesPageURL: URL { URL(string: "https://github.com/\(name)/releases")! }
 

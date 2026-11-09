@@ -3,8 +3,13 @@
 #include <array>
 #include <cstdint>
 #include <stdexcept>
+#if defined(__x86_64__)
 #include <xmmintrin.h>
+#else
+#include "prx/libc/include/General.hpp"
+#endif
 
+#if defined(__x86_64__)
 namespace {
 
 constexpr unsigned Exceptions = 0x3f;
@@ -141,3 +146,27 @@ int APS5_VABI fesettrapenable_nid_postfix(int exceptions) {
 }
 
 }
+
+#else
+
+extern "C" {
+
+int APS5_VABI fegetround_nid_postfix() { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fesetround_nid_postfix(int rounding) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fetestexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fegetexceptflag_nid_postfix(std::uint16_t* flags, int exceptions) { NotImplemented_nid_no_patch(__func__); }
+void APS5_VABI _Feraise_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fesetexceptflag_nid_postfix(const std::uint16_t* flags, int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI feraiseexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI feclearexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI feenableexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fedisableexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI __feenableexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI __fedisableexcept_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fegettrapenable_nid_postfix() { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fegetexcept_nid_postfix() { NotImplemented_nid_no_patch(__func__); }
+int APS5_VABI fesettrapenable_nid_postfix(int exceptions) { NotImplemented_nid_no_patch(__func__); }
+
+}
+
+#endif

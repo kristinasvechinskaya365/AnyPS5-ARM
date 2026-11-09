@@ -658,8 +658,14 @@ float APS5_VABI strtof_nid_postfix(const char* str, char** endptr) {
     return ParseFloat<float>(str, endptr, std::strtof);
 }
 long double APS5_VABI strtold_nid_postfix(const char* str, char** endptr) {
+#if defined(__aarch64__)
+    static_cast<void>(str);
+    static_cast<void>(endptr);
+    NotImplemented_nid_no_patch(__func__);
+#else
     static_assert(sizeof(long double) == 16, "Guest long double requires x87 extended precision storage");
     return ParseFloat<long double>(str, endptr, std::strtold);
+#endif
 }
 
 int APS5_VABI atoi_nid_postfix(const char* str) {
@@ -949,11 +955,17 @@ float APS5_VABI wcstof_nid_postfix(const char16_t* str, char16_t** endptr) {
 }
 
 long double APS5_VABI wcstold_nid_postfix(const char16_t* str, char16_t** endptr) {
+#if defined(__aarch64__)
+    static_cast<void>(str);
+    static_cast<void>(endptr);
+    NotImplemented_nid_no_patch(__func__);
+#else
 #ifndef __EMSCRIPTEN__
     static_assert(sizeof(long double) == 16);
     static_assert(std::numeric_limits<long double>::digits == 64);
 #endif
     return ParseAsciiPrefix(str, endptr, [](const char* text, char** end) { return ParseFloat<long double>(text, end, std::strtold); });
+#endif
 }
 
 unsigned long long APS5_VABI wcstoul_nid_postfix(const char16_t* str, char16_t** endptr, int base) {

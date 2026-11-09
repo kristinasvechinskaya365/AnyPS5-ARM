@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#if defined(__x86_64__)
 #include <emmintrin.h>
+#endif
 #include <limits>
 #include <stdexcept>
 
@@ -25,6 +27,9 @@ private:
     int saved;
 };
 
+constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
+
+#if defined(__x86_64__)
 struct ExtendedBits {
     std::uint64_t mantissa;
     std::uint16_t signExponent;
@@ -39,8 +44,6 @@ ExtendedBits Bits(const long double& value) {
     return bits;
 }
 
-constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
-
 short TestExtended(const ExtendedBits& bits) {
     const int exponent = bits.signExponent & 0x7fff;
     const std::uint64_t fraction = bits.mantissa & 0x7fffffffffffffffull;
@@ -48,6 +51,7 @@ short TestExtended(const ExtendedBits& bits) {
     if ((bits.mantissa >> 63) != 0) return Finite;
     return exponent != 0 || bits.mantissa != 0 ? Denormal : Zero;
 }
+#endif
 
 template<typename TFloat>
 short TestFloat(TFloat value) {
@@ -81,6 +85,7 @@ int Exponent(std::int64_t exponent) {
     return static_cast<int>(std::clamp<std::int64_t>(exponent, INT_MIN, INT_MAX));
 }
 
+#if defined(__x86_64__)
 void StoreExtended(long double* value, const ExtendedBits& bits) {
     unsigned char bytes[sizeof(long double)] = {};
     std::memcpy(bytes, value, sizeof(bytes));
@@ -98,6 +103,7 @@ long double ExtendedValue(const ExtendedBits& bits) {
     const long double magnitude = std::ldexp(static_cast<long double>(bits.mantissa), (exponent == 0 ? 1 : exponent) - 16383 - 63);
     return (bits.signExponent & 0x8000) != 0 ? -magnitude : magnitude;
 }
+#endif
 
 template<typename TBits, int FractionBits, int ExponentBits>
 short DropFraction(void* value, short scale) {
@@ -261,27 +267,46 @@ TFloat FusedPolynomial(TFloat x, const TFloat* table, int degree) {
 
 extern "C" {
 
-long double APS5_VABI copysignl_nid_postfix(long double x, long double y) { return std::copysign(x, y); }
+long double APS5_VABI copysignl_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
+    return std::copysign(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 long double APS5_VABI fdiml_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
     if (std::isnan(x)) return x;
     if (std::isnan(y)) return y;
     return x > y ? x - y : 0.0L;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI fmodl_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
     if (!std::isfinite(x) || y == 0.0L || std::isnan(y)) {
         errno = EDOM;
         return (x * y) / (x * y);
     }
     ErrnoGuard guard;
     return std::fmod(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI remainderl_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
     return Remainder(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI remquol_nid_postfix(long double x, long double y, int* quotient) {
+#if defined(__x86_64__)
     const bool domain = !std::isnan(x) && !std::isnan(y) && (std::isinf(x) || y == 0.0L);
     int bits = 0;
     long double result;
@@ -292,56 +317,110 @@ long double APS5_VABI remquol_nid_postfix(long double x, long double y, int* quo
     if (domain) errno = EDOM;
     if (!std::isnan(result)) *quotient = bits < 0 ? -(-bits & 7) : (bits & 7);
     return result;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI logbl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     ErrnoGuard guard;
     return std::logb(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 int APS5_VABI ilogbl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     if ((Bits(x).signExponent & 0x7fff) == 0x7fff) return INT_MAX;
     ErrnoGuard guard;
     return std::ilogb(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
-long double APS5_VABI rintl_nid_postfix(long double x) { return std::rint(x); }
-long double APS5_VABI roundl_nid_postfix(long double x) { return std::isfinite(x) ? std::round(x) : x; }
+long double APS5_VABI rintl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::rint(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+long double APS5_VABI roundl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return std::isfinite(x) ? std::round(x) : x;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 std::int64_t APS5_VABI lroundl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     ErrnoGuard guard;
     return std::llround(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 std::int64_t APS5_VABI lrintl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     ErrnoGuard guard;
     return std::llrint(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long long APS5_VABI llrintl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     ErrnoGuard guard;
     return std::llrint(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI sqrtl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     return std::sqrt(x);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI modfl_nid_postfix(long double x, long double* integral) {
+#if defined(__x86_64__)
     if (std::isnan(x)) {
         *integral = x;
         return x;
     }
     return std::modf(x, integral);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
-long double APS5_VABI nanl_nid_postfix(const char*) { return std::numeric_limits<long double>::quiet_NaN(); }
+long double APS5_VABI nanl_nid_postfix(const char*) {
+#if defined(__x86_64__)
+    return std::numeric_limits<long double>::quiet_NaN();
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 long double APS5_VABI scalblnl_nid_postfix(long double x, std::int64_t exponent) {
+#if defined(__x86_64__)
     ErrnoGuard guard;
     return std::scalbn(x, static_cast<int>(exponent));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 long double APS5_VABI fmal_nid_postfix(long double x, long double y, long double z) {
+#if defined(__x86_64__)
     if (x == 0.0L || y == 0.0L) return x * y + z;
     if (z == 0.0L) return x * y;
     if (!std::isfinite(x) || !std::isfinite(y)) return x * y + z;
@@ -353,6 +432,9 @@ long double APS5_VABI fmal_nid_postfix(long double x, long double y, long double
     if (xExponent + yExponent - zExponent > 2 * std::numeric_limits<long double>::digits) return x * y;
     ErrnoGuard guard;
     return std::fma(x, y, z);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 double APS5_VABI floor_nid_postfix(double x) { return std::isnan(x) ? x + x : std::floor(x); }
@@ -362,13 +444,37 @@ float APS5_VABI rintf_nid_postfix(float x) { return std::isnan(x) ? x + x : std:
 float APS5_VABI nearbyintf_nid_postfix(float x) { return std::isnan(x) ? x + x : std::rintf(x); }
 double APS5_VABI nearbyint_nid_postfix(double x) { return std::isnan(x) ? x + x : std::rint(x); }
 
-std::int64_t APS5_VABI lrint_nid_postfix(double x) { return _mm_cvtsd_si64(_mm_set_sd(x)); }
+std::int64_t APS5_VABI lrint_nid_postfix(double x) {
+#if defined(__x86_64__)
+    return _mm_cvtsd_si64(_mm_set_sd(x));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
-std::int64_t APS5_VABI lrintf_nid_postfix(float x) { return _mm_cvtss_si64(_mm_set_ss(x)); }
+std::int64_t APS5_VABI lrintf_nid_postfix(float x) {
+#if defined(__x86_64__)
+    return _mm_cvtss_si64(_mm_set_ss(x));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
-long long APS5_VABI llrint_nid_postfix(double x) { return _mm_cvtsd_si64(_mm_set_sd(x)); }
+long long APS5_VABI llrint_nid_postfix(double x) {
+#if defined(__x86_64__)
+    return _mm_cvtsd_si64(_mm_set_sd(x));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
-long long APS5_VABI llrintf_nid_postfix(float x) { return _mm_cvtss_si64(_mm_set_ss(x)); }
+long long APS5_VABI llrintf_nid_postfix(float x) {
+#if defined(__x86_64__)
+    return _mm_cvtss_si64(_mm_set_ss(x));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 double APS5_VABI drem_nid_postfix(double x, double y) {
     return Remainder(x, y);
@@ -412,29 +518,68 @@ int APS5_VABI finite_nid_postfix(double x) { return std::isfinite(x) ? 1 : 0; }
 int APS5_VABI finitef_nid_postfix(float x) { return std::isfinite(x) ? 1 : 0; }
 
 int APS5_VABI __fpclassifyl_nid_postfix(long double x) {
+#if defined(__x86_64__)
     const ExtendedBits bits = Bits(x);
     const int exponent = bits.signExponent & 0x7fff;
     if (exponent == 0) return bits.mantissa != 0 ? Denormal : Zero;
     return exponent != 0x7fff ? Finite : TestExtended(bits);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
-int APS5_VABI __isinfl_nid_postfix(long double x) { return TestExtended(Bits(x)) == Infinite ? 1 : 0; }
-int APS5_VABI __isnanl_nid_postfix(long double x) { return TestExtended(Bits(x)) == NotANumber ? 1 : 0; }
+int APS5_VABI __isinfl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return TestExtended(Bits(x)) == Infinite ? 1 : 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+int APS5_VABI __isnanl_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return TestExtended(Bits(x)) == NotANumber ? 1 : 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 int APS5_VABI __isnormall_nid_postfix(long double x) {
+#if defined(__x86_64__)
     const int exponent = Bits(x).signExponent & 0x7fff;
     return exponent != 0 && exponent != 0x7fff ? 1 : 0;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
-short APS5_VABI _LDtest_nid_postfix(const long double* value) { return TestExtended(Bits(*value)); }
+short APS5_VABI _LDtest_nid_postfix(const long double* value) {
+#if defined(__x86_64__)
+    return TestExtended(Bits(*value));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 int APS5_VABI _Dclass_nid_postfix(double x) { return TestFloat(x); }
 int APS5_VABI _FDclass_nid_postfix(float x) { return TestFloat(x); }
-int APS5_VABI _LDclass_nid_postfix(long double x) { return TestExtended(Bits(x)); }
-short APS5_VABI _LDsign_nid_postfix(long double x) { return static_cast<short>(Bits(x).signExponent & 0x8000); }
+int APS5_VABI _LDclass_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return TestExtended(Bits(x));
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
+short APS5_VABI _LDsign_nid_postfix(long double x) {
+#if defined(__x86_64__)
+    return static_cast<short>(Bits(x).signExponent & 0x8000);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 short APS5_VABI _Dint_nid_postfix(double* value, short scale) { return DropFraction<std::uint64_t, 52, 11>(value, scale); }
 short APS5_VABI _FDint_nid_postfix(float* value, short scale) { return DropFraction<std::uint32_t, 23, 8>(value, scale); }
 
 short APS5_VABI _LDint_nid_postfix(long double* value, short scale) {
+#if defined(__x86_64__)
     ExtendedBits bits = Bits(*value);
     const int field = bits.signExponent & 0x7fff;
     if (field == 0x7fff) return ExtendedNan(bits) ? NotANumber : Infinite;
@@ -450,12 +595,16 @@ short APS5_VABI _LDint_nid_postfix(long double* value, short scale) {
     bits.mantissa &= ~mask;
     StoreExtended(value, bits);
     return lost != 0 ? Finite : Zero;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 short APS5_VABI _Dscale_nid_postfix(double* value, std::int64_t exponent) { return ScaleBinary(value, exponent); }
 short APS5_VABI _FDscale_nid_postfix(float* value, std::int64_t exponent) { return ScaleBinary(value, exponent); }
 
 short APS5_VABI _LDscale_nid_postfix(long double* value, std::int64_t exponent) {
+#if defined(__x86_64__)
     const ExtendedBits bits = Bits(*value);
     if ((bits.signExponent & 0x7fff) == 0x7fff) return ExtendedNan(bits) ? NotANumber : Infinite;
     if (bits.mantissa == 0) {
@@ -466,12 +615,16 @@ short APS5_VABI _LDscale_nid_postfix(long double* value, std::int64_t exponent) 
     const short code = ScaleBinary(value, exponent);
     if (code == Zero) *value = 0.0L;
     return code;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 short APS5_VABI _Dunscale_nid_postfix(short* exponent, double* value) { return UnscaleBinary(exponent, value); }
 short APS5_VABI _FDunscale_nid_postfix(short* exponent, float* value) { return UnscaleBinary(exponent, value); }
 
 short APS5_VABI _LDunscale_nid_postfix(short* exponent, long double* value) {
+#if defined(__x86_64__)
     const ExtendedBits bits = Bits(*value);
     if ((bits.signExponent & 0x7fff) == 0x7fff) {
         *exponent = 0;
@@ -483,6 +636,9 @@ short APS5_VABI _LDunscale_nid_postfix(short* exponent, long double* value) {
     }
     *value = ExtendedValue(bits);
     return UnscaleBinary(exponent, value);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 short APS5_VABI _ZNSt8__sce_v27_DscaleEPdl_nid_postfix(double* value, std::int64_t exponent) { return ScaleFieldBits<std::uint64_t, 52, 11>(value, exponent); }
@@ -516,18 +672,28 @@ short APS5_VABI _ZNSt8__sce_v27_FDnormEPNS_5_FvalE_nid_postfix(std::uint16_t* wo
 
 int APS5_VABI _Fpcomp_nid_postfix(double x, double y) { return std::isnan(x) || std::isnan(y) ? 0 : Compare(x, y); }
 int APS5_VABI _FFpcomp_nid_postfix(float x, float y) { return std::isnan(x) || std::isnan(y) ? 0 : Compare(x, y); }
-int APS5_VABI _LFpcomp_nid_postfix(long double x, long double y) { return ExtendedNan(Bits(x)) || ExtendedNan(Bits(y)) ? 0 : Compare(x, y); }
+int APS5_VABI _LFpcomp_nid_postfix(long double x, long double y) {
+#if defined(__x86_64__)
+    return ExtendedNan(Bits(x)) || ExtendedNan(Bits(y)) ? 0 : Compare(x, y);
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
+}
 
 double APS5_VABI _Poly_nid_postfix(double x, const double* table, int degree) { return FusedPolynomial(x, table, degree); }
 float APS5_VABI _FPoly_nid_postfix(float x, const float* table, int degree) { return FusedPolynomial(x, table, degree); }
 
 long double APS5_VABI _LPoly_nid_postfix(long double x, const long double* table, int degree) {
+#if defined(__x86_64__)
     long double result = table[0];
     for (int index = 1; index <= degree; ++index) {
         result *= x;
         result += table[index];
     }
     return result;
+#else
+    NotImplemented_nid_no_patch(__func__);
+#endif
 }
 
 }

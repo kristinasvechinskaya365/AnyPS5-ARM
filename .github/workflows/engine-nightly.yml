@@ -50,7 +50,7 @@ on:
       dry_run:
         description: Plan and build, but make no tag and no release.
         type: boolean
-        default: false
+        default: true
       upstream:
         description: Build upstream's main (boykopovar/AnyPS5, unmodified) instead of AnyPS5-ARM's.
         type: boolean
@@ -66,7 +66,7 @@ concurrency:
 jobs:
   plan:
     name: Decide whether to build
-    if: github.event.schedule != '47 0 * * *' && !inputs.upstream
+    if: (github.event_name == 'workflow_dispatch' || github.repository == 'AnyTogether/AnyPS5-ARM') && github.event.schedule != '47 0 * * *' && !inputs.upstream
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -207,7 +207,7 @@ jobs:
 
   upstream-plan:
     name: Decide whether to build upstream main
-    if: github.event.schedule == '47 0 * * *' || inputs.upstream
+    if: (github.event_name == 'workflow_dispatch' || github.repository == 'AnyTogether/AnyPS5-ARM') && (github.event.schedule == '47 0 * * *' || inputs.upstream)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

@@ -121,7 +121,8 @@ final class ReleaseRepositoryTests: XCTestCase {
     func testMalformedRepositoryMakesNoRequests() async throws {
         for value in ["", "owner", "/repo", "owner/", "owner/repo/extra", "../repo", "owner/..", "owner/.",
                       "owner/a b", "owner/repo?per_page=1", "owner/repo#fragment", "owner/repo%2Freleases",
-                      "https://github.com/owner/repo", "owner\\repo", "\nowner/repo", "owner/répô"] {
+                      "https://github.com/owner/repo", "owner\\repo", "\nowner/repo", "owner/répô",
+                      String(repeating: "x", count: 40) + "/repo", "owner/" + String(repeating: "x", count: 101)] {
             let bundle = try bundle(value)
             XCTAssertNil(ReleaseRepository.configured(in: bundle), value)
             let stable = await Updates.lookup(current: "0.2.20", session: session, bundle: bundle)
@@ -185,5 +186,23 @@ final class ReleaseRepositoryTests: XCTestCase {
         let entry = try XCTUnwrap(entries?.first)
         XCTAssertEqual(entry.trust, .unsignedRefused)
         requests(["https://api.github.com/repos/kristinasvechinskaya365/AnyPS5-ARM/releases?per_page=40"])
+    }
+
+    func testSupportPagesUseValidatedMetadataOrTheKnownFork() throws {
+        let scenarios: [(Any?, String)] = [(nil, "kristinasvechinskaya365/AnyPS5-ARM"),
+                                           ("developer/Custom-Port", "developer/Custom-Port"),
+                                           ("owner/repo/extra", "kristinasvechinskaya365/AnyPS5-ARM"),
+                                           (String(repeating: "x", count: 40) + "/repo", "kristinasvechinskaya365/AnyPS5-ARM"),
+                                           ("owner/" + String(repeating: "x", count: 101), "kristinasvechinskaya365/AnyPS5-ARM"),
+                                           (["owner", "repo"], "kristinasvechinskaya365/AnyPS5-ARM")]
+        for (value, expected) in scenarios {
+            let repository = ReleaseRepository.support(in: try bundle(value))
+            XCTAssertEqual(repository.name, expected)
+            XCTAssertEqual(repository.pageURL.absoluteString, "https://github.com/\(expected)")
+            XCTAssertEqual(repository.macOSBuildGuideURL.absoluteString, "https://github.com/\(expected)/blob/main/docs/dev/MACOS_PORT.md")
+        }
+        let longest = String(repeating: "x", count: 39) + "/" + String(repeating: "y", count: 100)
+        XCTAssertEqual(ReleaseRepository(longest)?.name, longest)
+        requests([])
     }
 }

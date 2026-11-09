@@ -403,9 +403,7 @@ extension AppModel {
         about += [
             PanelRow(id: "toolkit", title: T.text(.toolkitVersion), kind: .info(builtInToolkit.map { Toolkit.shortVersion($0.version) } ?? "—")),
             PanelRow(id: "author", title: T.text(.madeBy), kind: .info("Utku Halis")),
-            PanelRow(id: "github", title: "GitHub", detail: "github.com/AnyTogether/AnyPS5-ARM", symbol: "chevron.left.forwardslash.chevron.right", kind: .action(destructive: false) {
-                NSWorkspace.shared.open(URL(string: "https://github.com/AnyTogether/AnyPS5-ARM")!)
-            }),
+            supportRepositoryRow(),
             PanelRow(id: "upstream", title: T.text(.builtOn), detail: "github.com/boykopovar/AnyPS5", symbol: "heart", kind: .action(destructive: false) {
                 NSWorkspace.shared.open(URL(string: "https://github.com/boykopovar/AnyPS5")!)
             }),
@@ -457,6 +455,13 @@ extension AppModel {
             PanelCategory(id: "fonts", title: TF.text(.title), symbol: "textformat", rows: fontRows()),
             PanelCategory(id: "about", title: T.text(.about), symbol: "info.circle", rows: about),
         ]
+    }
+
+    func supportRepositoryRow(bundle: Bundle = .main) -> PanelRow {
+        let repository = ReleaseRepository.support(in: bundle)
+        return PanelRow(id: "github", title: "GitHub", detail: "github.com/\(repository.name)", symbol: "chevron.left.forwardslash.chevron.right", kind: .action(destructive: false) {
+            NSWorkspace.shared.open(repository.pageURL)
+        })
     }
 
     private func gameRows(_ game: Game) -> [PanelRow] {

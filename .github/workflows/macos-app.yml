@@ -14,6 +14,7 @@ on:
       - tools/release/**
       - tools/required_test_report.py
       - tools/tests/test_macos_install*
+      - tools/tests/test_bundle_minimum.py
   workflow_dispatch:
 
 permissions:
@@ -90,6 +91,46 @@ jobs:
           Path("diagnostics/installer-report.json").write_text(json.dumps(report, indent=2) + "\n")
           if not report["passed"]:
               raise SystemExit("the installer baseline and candidate gates did not pass")
+          PY
+      - name: Require complete Mach-O minimum-version checks
+        run: |
+          python3 - <<'PY' 2>&1 | tee diagnostics/bundle-minimum-tests.log
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import unittest
+          from tools.tests import test_bundle_minimum as fixtures
+
+          required = {
+              "test_every_actual_slice_contributes_to_the_packaged_minimum",
+              "test_older_slices_retain_the_launcher_floor_without_using_sdk_version",
+              "test_versions_compare_numerically_across_all_components",
+              "test_numeric_and_symbolic_macos_platforms_are_supported",
+              "test_non_macos_platforms_are_rejected_before_publication",
+              "test_missing_duplicate_and_conflicting_load_commands_are_rejected",
+              "test_malformed_minimum_versions_are_rejected",
+              "test_missing_runtime_files_and_empty_library_sets_are_rejected",
+              "test_external_binary_links_are_rejected",
+              "test_missing_and_duplicate_architectures_are_rejected",
+              "test_tool_errors_and_unexpected_diagnostics_are_fatal",
+              "test_declared_minimum_must_cover_every_slice_and_the_floor",
+          }
+          names = set(unittest.defaultTestLoader.getTestCaseNames(fixtures.BundleMinimumTests))
+          if names != required:
+              raise SystemExit("the bundle minimum-version fixture inventory changed")
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(fixtures.BundleMinimumTests)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          passed = (result.testsRun == len(required) and result.wasSuccessful() and not result.skipped and
+                    not result.expectedFailures and not result.unexpectedSuccesses)
+          report = {"revision": os.environ["GITHUB_SHA"], "required": sorted(required), "executed": result.testsRun,
+                    "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped),
+                    "fixture_sha256": hashlib.sha256(Path(fixtures.__file__).read_bytes()).hexdigest(),
+                    "scanner_sha256": hashlib.sha256(Path("tools/macos/bundle_minimum.py").read_bytes()).hexdigest(),
+                    "passed": passed}
+          Path("diagnostics/bundle-minimum-report.json").write_text(json.dumps(report, indent=2) + "\n")
+          if not passed:
+              raise SystemExit("every bundle minimum-version fixture must execute and pass")
           PY
       - name: Upload installer evidence
         if: always()

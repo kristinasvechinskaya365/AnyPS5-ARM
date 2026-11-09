@@ -6,6 +6,8 @@
 
 ## English
 
+This fork's installation instructions are below. The title screenshots and frame rates are historical upstream reports, not measurements of this revision or an M2 Mac. The current launcher runs natively on Apple silicon, while its default game engine uses Rosetta. The optional native translator is experimental.
+
 ### Games that run
 
 | Dreaming Sarah | AnyPS5 Breakout | Stray (WIP) |
@@ -51,26 +53,21 @@ The [compatibility list](COMPATIBILITY.md) has every game tested on macOS, its s
 
 <sub>* System libraries: the share of the functions the project knows so far (declared in [core/libs/prx](../../core/libs/prx)) that are implemented, not of every PS5 system function. GPU shader instructions: the share of the RDNA instructions the shader recompiler translates. Regenerate them with `python3 tools/progress.py <directory>` and copy the three SVG files to `docs/progress/`.</sub>
 
-| Check | Result |
-|---|---|
-| Guest fixtures (TLS, exceptions, threads, modules) | 10 of 10 pass |
-| Test suite on MoltenVK | 477 of 484 pass |
-
-Measured with Vulkan SDK 1.4.363.0. The 7 failing tests hit Apple GPU or Metal limits, such as 64-bit buffer atomics and 32 KiB threadgroup memory. [MACOS_PORT.md](../dev/MACOS_PORT.md) lists them, along with every change this fork makes.
+Current build and regression results are recorded for each exact commit in this fork's [Actions runs](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions). [MACOS_PORT.md](../dev/MACOS_PORT.md) separates the current build checks from historical upstream GPU measurements and their limitations.
 
 ### The AnyPS5 app
 
-**AnyPS5.app** is a launcher laid out like the PS5 home screen. It finds the game dumps in a folder, unlocks (converts) them for the Mac and starts them: no Terminal, no build, no Vulkan SDK.
+**AnyPS5.app** is a launcher laid out like the PS5 home screen. It finds game dumps in a folder, converts supported dumps for the Mac and starts them. The packaged app includes the engine and Vulkan runtime; installing it needs no compiler, Python or Vulkan SDK.
 
-<p><a href="https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip"><b>⬇ Download AnyPS5 for macOS</b></a> · Apple silicon · macOS 14+</p>
-
-**Install.** The quickest way is one line in Terminal; a download through `curl` is not quarantined, so macOS opens the app without any "cannot be opened" warning:
+**Install.** Sign in to GitHub and open this fork's [macOS installable app builds](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml). Select a successful run on `main`, download its app artifact and extract it. In Terminal, open the extracted folder containing `install.sh`, `AnyPS5-macOS.zip` and `SHA256SUMS`, then run:
 
 ```sh
-curl -fsSL https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/install.sh | sh
+sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS --open
 ```
 
-With the zip from the [latest release](https://github.com/AnyTogether/AnyPS5-ARM/releases/latest) instead, the app is not notarized, so macOS blocks it the first time: open **System Settings → Privacy & Security** and click **Open Anyway**. If it then runs from the read-only copy macOS makes of downloaded apps, the launcher offers to move itself to Applications and reopen from there.
+The app is installed in `~/Applications`. The installer verifies its checksum, code signature, architecture and actual minimum macOS version before replacing an existing app. Each build requires at least macOS 14, and its bundled binaries may require a newer version. Artifacts remain available for 90 days; **Run workflow** on `main` rebuilds an expired artifact.
+
+CI packages use ad hoc signatures and are not notarized. The installer preserves browser quarantine. If macOS blocks a package you have verified and trust, follow [Apple's instructions](https://support.apple.com/en-us/102445) for **System Settings → Privacy & Security → Open Anyway**. The default game engine needs Rosetta on Apple silicon. If it is missing, run `softwareupdate --install-rosetta` and follow Apple's prompts.
 
 **First start.** Pick the language, one of four animated themes (Cosmic, Aurora, Sunset, Glass) and the folder that holds your PS5 dumps. Subfolders are scanned, and games added later show up on their own.
 
@@ -159,7 +156,7 @@ The launcher is driven with the arrow keys, Return and Esc, a game controller (D
 
 AnyPS5-ARM is the macOS port of [AnyPS5](https://github.com/boykopovar/AnyPS5). AnyPS5 is not an emulator. Its relinker turns a PS5 executable into a native program, and its system libraries are reimplemented as ordinary shared libraries the program links against. This fork makes that work on Apple silicon:
 
-- **CPU:** the game's x86-64 code runs under **Rosetta 2**. A [native arm64 mode](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md) that translates the code ahead of time, with no Rosetta, is in development on the `native-arm64` branch.
+- **CPU:** the default game engine runs x86-64 code under **Rosetta 2**. The optional [native ARM64 translator](../dev/NATIVE_ARM64.md) is included on `main`; it is experimental and its fixtures do not establish commercial-title compatibility.
 - **Executable:** the relinker writes a **Mach-O** executable.
 - **Graphics:** the PS5 graphics driver runs on **Vulkan through MoltenVK**, which runs on Metal.
 - **Distribution:** the result is packaged as a normal **`.app`** you open from Finder.
@@ -280,6 +277,8 @@ Controllers that SDL recognizes, such as DualSense, DualShock and Xbox pads, wor
 
 ## Türkçe
 
+Bu fork'un kurulum adımları aşağıdadır. Oyun ekran görüntüleri ve FPS değerleri, üst projeden alınan geçmiş raporlardır; bu sürümün veya bir M2 Mac'in ölçümleri değildir. Launcher Apple silicon üzerinde yerel olarak çalışır, varsayılan oyun motoru ise Rosetta kullanır. İsteğe bağlı native çevirici deneyseldir.
+
 ### Çalışan oyunlar
 
 | Dreaming Sarah | AnyPS5 Breakout | Stray (geliştiriliyor) |
@@ -325,26 +324,21 @@ Artık varsayılan ayarlarla çalışıyor. Yazı tipinin bazı harfleri eksik (
 
 <sub>* Sistem kütüphaneleri: projenin şimdiye kadar bildiği fonksiyonların ([core/libs/prx](../../core/libs/prx) içinde tanımlananlar) ne kadarının yazıldığı; PS5'in bütün sistem fonksiyonlarının değil. GPU shader komutları: shader derleyicisinin çevirebildiği RDNA komutlarının oranı. Yeniden üretmek için `python3 tools/progress.py <klasör>` çalıştırıp üç SVG dosyasını `docs/progress/` klasörüne kopyala.</sub>
 
-| Kontrol | Sonuç |
-|---|---|
-| Misafir testleri (TLS, istisnalar, thread'ler, modüller) | 10/10 geçiyor |
-| MoltenVK üzerinde test paketi | 484 testin 477'si geçiyor |
-
-Ölçümler Vulkan SDK 1.4.363.0 ile yapıldı. Geçmeyen 7 test, Apple GPU'sunun veya Metal'in sınırlarına takılıyor; örneğin 64-bit buffer atomikleri ve 32 KiB threadgroup belleği. [MACOS_PORT.md](../dev/MACOS_PORT.md) bu testleri ve bu fork'un yaptığı tüm değişiklikleri listeler.
+Güncel derleme ve regresyon sonuçları, her commit için bu fork'un [Actions kayıtlarında](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions) bulunur. [MACOS_PORT.md](../dev/MACOS_PORT.md), güncel derleme kontrollerini üst projenin geçmiş GPU ölçümlerinden ve sınırlamalarından ayrı açıklar.
 
 ### AnyPS5 uygulaması
 
-**AnyPS5.app**, PS5 ana ekranı gibi tasarlanmış bir launcher. Bir klasördeki oyun dump'larını bulur, Mac için kilidini açar (dönüştürür) ve başlatır: Terminal, derleme ya da Vulkan SDK gerekmez.
+**AnyPS5.app**, PS5 ana ekranı gibi tasarlanmış bir launcher. Bir klasördeki oyun dump'larını bulur, desteklenen dump'ları Mac için dönüştürür ve başlatır. Paket, oyun motorunu ve Vulkan çalışma zamanı dosyalarını içerir; kurulum için derleyici, Python veya Vulkan SDK gerekmez.
 
-<p><a href="https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip"><b>⬇ AnyPS5'i indir</b></a> · Apple silicon · macOS 14+</p>
-
-**Kurulum.** En kolayı Terminal'de tek satır. `curl` ile inen dosya karantinaya alınmadığı için macOS uygulamayı "açılamıyor" uyarısı vermeden açar:
+**Kurulum.** GitHub'a giriş yapıp bu fork'un [macOS installable app derlemelerini](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) aç. `main` üzerindeki başarılı bir çalıştırmanın uygulama artifact'ini indir ve çıkart. Terminal'de `install.sh`, `AnyPS5-macOS.zip` ve `SHA256SUMS` dosyalarının bulunduğu klasörü açıp çalıştır:
 
 ```sh
-curl -fsSL https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/install.sh | sh
+sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS --open
 ```
 
-[Son sürümdeki](https://github.com/AnyTogether/AnyPS5-ARM/releases/latest) zip'i kullanırsan uygulama notarize edilmediği için macOS ilk seferde engeller: **Sistem Ayarları → Gizlilik ve Güvenlik**'te **Yine de Aç**'a tıkla. macOS indirilen uygulamayı salt okunur bir kopyadan açarsa launcher kendini Uygulamalar'a taşıyıp oradan yeniden açmayı önerir.
+Uygulama `~/Applications` içine kurulur. Yükleyici, mevcut uygulamayı değiştirmeden önce sağlama toplamını, kod imzasını, mimariyi ve gerçek minimum macOS sürümünü doğrular. Her derleme en az macOS 14 gerektirir; paketteki dosyalar daha yeni bir sürüm gerektirebilir. Artifact'ler 90 gün saklanır; süresi dolduğunda `main` üzerinde **Run workflow** ile yeniden derlenebilir.
+
+CI paketleri ad hoc imzalıdır ve Apple tarafından notarize edilmemiştir. Yükleyici, tarayıcının karantina bilgisini korur. macOS, doğruladığın ve güvendiğin paketi engellerse [Apple'ın yönergelerindeki](https://support.apple.com/en-us/102445) **Sistem Ayarları → Gizlilik ve Güvenlik → Yine de Aç** adımını kullan. Varsayılan oyun motoru Apple silicon üzerinde Rosetta gerektirir. Eksikse `softwareupdate --install-rosetta` komutunu çalıştırıp Apple'ın yönergelerini izle.
 
 **İlk açılış.** Dili, dört hareketli temadan birini (Kozmik, Aurora, Gün Batımı, Cam) ve PS5 dump'larının olduğu klasörü seç. Alt klasörler de taranır, sonradan eklenen oyunlar kendiliğinden görünür.
 
@@ -418,7 +412,7 @@ Launcher ok tuşları, Return ve Esc ile, oyun kumandasıyla (yön tuşları, �
 
 AnyPS5-ARM, [AnyPS5](https://github.com/boykopovar/AnyPS5)'in macOS sürümüdür. AnyPS5 bir emülatör değildir. Relinker'ı PS5 oyun dosyasını yerel bir programa dönüştürür. Sistem kütüphaneleri de yeniden yazılmıştır ve program bunlara normal paylaşımlı kütüphaneler gibi bağlanır. Bu fork, bunu Apple silicon'da çalışır hale getirir:
 
-- **İşlemci:** Oyunun x86-64 kodu **Rosetta 2** altında çalışır. Kodu önceden arm64'e çeviren ve Rosetta gerektirmeyen bir [native arm64 modu](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md), `native-arm64` dalında geliştiriliyor.
+- **İşlemci:** Varsayılan oyun motoru x86-64 kodu **Rosetta 2** altında çalıştırır. İsteğe bağlı [native ARM64 çevirici](../dev/NATIVE_ARM64.md), `main` içinde bulunur; deneyseldir ve testleri ticari oyun uyumluluğunu kanıtlamaz.
 - **Çalıştırılabilir dosya:** Relinker, oyunu bir **Mach-O** dosyası olarak yazar.
 - **Grafik:** PS5 grafik sürücüsü, **MoltenVK üzerinden Vulkan** ile çalışır. MoltenVK da Metal'i kullanır.
 - **Dağıtım:** Sonuç, Finder'dan açılan normal bir **`.app`** olarak paketlenir.

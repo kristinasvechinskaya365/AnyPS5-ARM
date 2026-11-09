@@ -65,6 +65,7 @@ int APS5_VABI sigismember_nid_postfix(const GuestSignalSet* set, int signal) {
 #define APS5_SIGNAL_ASM_CALL(name) "    call " name "@PLT\n"
 #endif
 
+#if defined(__x86_64__)
 asm(".text\n"
     APS5_SIGNAL_ASM_FUNCTION("sigsetjmp_nid_postfix")
     "    movl %esi, 88(%rdi)\n"
@@ -133,3 +134,4 @@ asm(".text\n"
     "1:\n"
     "    movq %rcx, 0(%rsp)\n"
     "    ret\n");
+#endif

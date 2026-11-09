@@ -82,3 +82,12 @@
 [submodule "3rdparty/sqlite"]
 	path = 3rdparty/sqlite
 	url = https://github.com/sqlite/sqlite.git
+[submodule "3rdparty/llvm-project"]
+	path = 3rdparty/llvm-project
+	url = https://github.com/llvm/llvm-project.git
+	update = none
+	shallow = true
+[submodule "3rdparty/capstone"]
+	path = 3rdparty/capstone
+	url = https://github.com/capstone-engine/capstone.git
+	shallow = true

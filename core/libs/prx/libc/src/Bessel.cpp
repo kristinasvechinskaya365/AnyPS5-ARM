@@ -3,7 +3,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 #include <limits>
 
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -104,9 +106,14 @@ double Signed(std::uint32_t value) {
 }
 
 double SquareRoot(double x) {
+#if defined(__x86_64__)
     return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(x)));
+#else
+    return std::sqrt(x);
+#endif
 }
 
+#if defined(__x86_64__)
 const bool HardwareFma = [] {
     __builtin_cpu_init();
     return __builtin_cpu_supports("fma") != 0;
@@ -115,9 +122,14 @@ const bool HardwareFma = [] {
 [[gnu::target("fma")]] double HardwareFused(double a, double b, double c) {
     return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)));
 }
+#endif
 
 double Fused(double a, double b, double c) {
+#if defined(__x86_64__)
     return HardwareFma ? HardwareFused(a, b, c) : std::fma(a, b, c);
+#else
+    return std::fma(a, b, c);
+#endif
 }
 
 template <std::size_t Count>

@@ -9,11 +9,11 @@ public struct IssueDraft: Sendable {
         public let value: String
     }
 
-    public static let repository = "AnyTogether/AnyPS5-ARM"
+    public static var repository: String { ReleaseRepository.support().name }
     /// The engine's own repository, for a bug in the engine rather than in the Mac port.
     public static let engineRepository = "boykopovar/AnyPS5"
     /// Where the launcher's own crashes and stalls go (.github/ISSUE_TEMPLATE/launcher_crash.yml).
-    public static let launcherRepository = "AnyTogether/AnyPS5-ARM"
+    public static var launcherRepository: String { repository }
     public static let maximumLength = 7000
     /// One log line longer than this is cut, so it cannot crowd out the rest.
     static let lineLimit = 300
@@ -30,7 +30,8 @@ public struct IssueDraft: Sendable {
     static let attachHint = "Attach the report file the launcher saved (Export Report): drag %@ into this box."
 
     /// The Mac port's crash form (.github/ISSUE_TEMPLATE/crash.yml).
-    public static func crash(_ report: SessionReport, logLines: Int = 60) -> IssueDraft {
+    public static func crash(_ report: SessionReport, logLines: Int = 60, bundle: Bundle = .main) -> IssueDraft {
+        let repository = ReleaseRepository.support(in: bundle).name
         var reason = report.reason
         let crash = report.crashSummary(frames: 6)
         if !crash.isEmpty { reason += "\n" + crash.joined(separator: "\n") }
@@ -48,7 +49,8 @@ public struct IssueDraft: Sendable {
     }
 
     /// The engine's bug form (boykopovar/AnyPS5, bug_report.yml), with the same facts.
-    public static func engine(_ report: SessionReport, logLines: Int = 60) -> IssueDraft {
+    public static func engine(_ report: SessionReport, logLines: Int = 60, bundle: Bundle = .main) -> IssueDraft {
+        let repository = ReleaseRepository.support(in: bundle).name
         let engine = report.unlockedWith ?? report.engineNow ?? "unknown"
         let crash = report.crashSummary(frames: 6)
         let fixed = [
@@ -65,7 +67,8 @@ public struct IssueDraft: Sendable {
 
     /// The launcher's own crash or stall (LauncherHealth), on launcher_crash.yml: every field
     /// cleaned by `privacy`, the oldest lines going first until the link is short enough.
-    public static func launcherProblem(_ problem: LauncherProblem, system: SystemInfo, privacy: ReportPrivacy) -> IssueDraft {
+    public static func launcherProblem(_ problem: LauncherProblem, system: SystemInfo, privacy: ReportPrivacy, bundle: Bundle = .main) -> IssueDraft {
+        let repository = ReleaseRepository.support(in: bundle).name
         let formatter = ISO8601DateFormatter()
         let at = String(formatter.string(from: problem.at).prefix(19)).replacingOccurrences(of: "T", with: " ")
         let seconds = Int(problem.stalledFor ?? 0)
@@ -92,7 +95,7 @@ public struct IssueDraft: Sendable {
                 Field(id: "error", label: "Uncaught error", value: error),
                 Field(id: "log", label: "Last seconds", value: lines.isEmpty ? "(none kept)" : lines.joined(separator: "\n")),
             ]
-            let url = link(repository: launcherRepository, template: "launcher_crash.yml", title: title, fields: fields)
+            let url = link(repository: repository, template: "launcher_crash.yml", title: title, fields: fields)
             if url.absoluteString.count <= maximumLength { return IssueDraft(title: title, fields: fields, url: url) }
             if !lines.isEmpty {
                 lines.removeFirst()
