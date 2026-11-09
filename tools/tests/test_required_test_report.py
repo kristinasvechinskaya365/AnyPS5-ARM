@@ -65,6 +65,61 @@ class RequiredTestReportTests(unittest.TestCase):
                 self.assertEqual(data["passed"], 0)
                 self.assertTrue(data["errors"])
 
+    def test_suite_level_failures_cannot_hide_behind_passing_cases(self):
+        for tag in ("error", "failure", "skipped"):
+            for nested in (False, True):
+                with self.subTest(tag=tag, nested=nested):
+                    content = f'<testcase name="lifecycle"/><{tag}>suite could not finish</{tag}>'
+                    if nested:
+                        content = f"<testsuite>{content}</testsuite>"
+                    data = self.ctest(["lifecycle"], content)
+                    self.assertEqual(data["passed"], 0)
+                    self.assertTrue(any("suite-level" in error for error in data["errors"]))
+
+    def test_declared_counts_must_match_testcase_evidence(self):
+        self.inventory.write_text(json.dumps({"tests": [{"name": "lifecycle"}]}), encoding="utf-8")
+        for attribute, values in (("tests", ["0", "2", "-1", "one", "1.0"]),
+                                  ("failures", ["1", "-1", "one", "0.0"]),
+                                  ("errors", ["1", "-1", "one", "0.0"]),
+                                  ("skipped", ["1", "-1", "one", "0.0"]),
+                                  ("disabled", ["1", "-1", "one", "0.0"])):
+            for value in values:
+                with self.subTest(attribute=attribute, value=value):
+                    self.junit.write_text(f'<testsuite {attribute}="{value}"><testcase name="lifecycle"/></testsuite>', encoding="utf-8")
+                    data = required_test_report.report(self.inventory, self.junit, "ctest", ["lifecycle"])
+                    self.assertEqual(data["passed"], 0)
+                    self.assertTrue(any("count" in error for error in data["errors"]))
+
+    def test_nested_suite_counts_accept_complete_evidence(self):
+        self.inventory.write_text(json.dumps({"tests": [{"name": "first"}, {"name": "second"}]}), encoding="utf-8")
+        self.junit.write_text('<testsuites tests="2" failures="0" errors="0" skipped="0">'
+                              '<testsuite tests="1" failures="0"><testcase name="first"/></testsuite>'
+                              '<testsuite tests="1" errors="0"><testcase name="second"/></testsuite>'
+                              '</testsuites>', encoding="utf-8")
+        data = required_test_report.report(self.inventory, self.junit, "ctest", ["first", "second"])
+        self.assertEqual(data["errors"], [])
+        self.assertEqual(data["passed"], 2)
+
+    def test_ctest_distinguishes_disabled_from_skipped_counts(self):
+        names = ["passed", "failed", "skipped", "disabled"]
+        self.inventory.write_text(json.dumps({"tests": [{"name": name} for name in names]}), encoding="utf-8")
+        self.junit.write_text('<testsuite tests="4" failures="1" disabled="1" skipped="1">'
+                              '<testcase name="passed" status="run"/>'
+                              '<testcase name="failed" status="fail"><failure/></testcase>'
+                              '<testcase name="skipped" status="notrun"><skipped/></testcase>'
+                              '<testcase name="disabled" status="disabled"/>'
+                              '</testsuite>', encoding="utf-8")
+        data = required_test_report.report(self.inventory, self.junit, "ctest", names)
+        self.assertEqual((data["passed"], data["failed"], data["skipped"], data["not_run"]), (1, 1, 1, 1))
+        self.assertFalse(any(error.startswith("results:") for error in data["errors"]))
+
+    def test_conflicting_testcase_outcomes_are_rejected(self):
+        for first, second in (("failure", "error"), ("failure", "skipped"), ("error", "skipped")):
+            with self.subTest(first=first, second=second):
+                data = self.ctest(["lifecycle"], f'<testcase name="lifecycle"><{first}/><{second}/></testcase>')
+                self.assertEqual(data["passed"], 0)
+                self.assertTrue(any("conflicting outcomes" in error for error in data["errors"]))
+
     def test_unexpected_test_does_not_replace_required_test(self):
         data = self.ctest(["lifecycle", "other"], '<testcase name="other"/>', ["lifecycle"])
         self.assertEqual(data["unexpected"], ["other"])
@@ -125,6 +180,29 @@ class RequiredTestReportTests(unittest.TestCase):
                 self.assertEqual(data["passed"], 0)
                 self.assertEqual(data[status], 1)
                 self.assertTrue(data["errors"])
+
+    def test_swift_log_cannot_replace_a_different_nonpassing_xml_outcome(self):
+        name = "AnyPS5CoreTests.InstallerRunTests/testRun"
+        self.inventory.write_text(name + "\n", encoding="utf-8")
+        for xml, log, retained in (("skipped", "failed", "skipped"), ("failure", "skipped", "failed"), ("error", "passed", "failed")):
+            with self.subTest(xml=xml, log=log):
+                self.junit.write_text('<testsuites><testsuite><testcase classname="AnyPS5CoreTests.InstallerRunTests" name="testRun">'
+                                      f'<{xml}/></testcase></testsuite></testsuites>', encoding="utf-8")
+                self.log.write_text(f"Test Case '-[AnyPS5CoreTests.InstallerRunTests testRun]' {log} (0.001 seconds).\n", encoding="utf-8")
+                data = required_test_report.report(self.inventory, self.junit, "swift", [name], log_path=self.log)
+                self.assertEqual(data["passed"], 0)
+                self.assertEqual(data["tests"][name]["status"], retained)
+                self.assertTrue(any("statuses disagree" in error for error in data["errors"]))
+
+    def test_swift_completed_pass_does_not_hide_a_suite_error(self):
+        name = "AnyPS5CoreTests.InstallerRunTests/testRun"
+        self.inventory.write_text(name + "\n", encoding="utf-8")
+        self.junit.write_text('<testsuites><testsuite errors="1"><testcase classname="AnyPS5CoreTests.InstallerRunTests" name="testRun"/>'
+                              '<error>worker failed</error></testsuite></testsuites>', encoding="utf-8")
+        self.log.write_text("Test Case '-[AnyPS5CoreTests.InstallerRunTests testRun]' passed (0.001 seconds).\n", encoding="utf-8")
+        data = required_test_report.report(self.inventory, self.junit, "swift", [name], log_path=self.log)
+        self.assertEqual(data["passed"], 0)
+        self.assertTrue(any("suite-level error" in error for error in data["errors"]))
 
     def test_swift_duplicate_completions_cannot_mask_a_skip(self):
         self.log.write_text("Test Case '-[AnyPS5CoreTests.InstallerRunTests testRun]' skipped (0.001 seconds).\nTest Case '-[AnyPS5CoreTests.InstallerRunTests testRun]' passed (0.001 seconds).\n", encoding="utf-8")

@@ -28,6 +28,22 @@ def results(path, kind):
     root = ET.parse(path).getroot()
     if root.tag not in ("testsuite", "testsuites"):
         raise ValueError(f"expected JUnit testsuite or testsuites, got {root.tag!r}")
+    for suite in root.iter():
+        if suite.tag not in ("testsuite", "testsuites"):
+            continue
+        for child in suite:
+            if child.tag in ("error", "failure", "skipped"):
+                raise ValueError(f"JUnit {suite.tag} contains a suite-level {child.tag}")
+        cases = list(suite.iter("testcase"))
+        counts = {"tests": len(cases),
+                  "failures": sum(case.find("failure") is not None for case in cases),
+                  "errors": sum(case.find("error") is not None for case in cases),
+                  "skipped": sum(case.find("skipped") is not None for case in cases),
+                  "disabled": sum(case.get("status") == "disabled" for case in cases)}
+        for name, count in counts.items():
+            declared = suite.get(name)
+            if declared is not None and (re.fullmatch(r"[0-9]+", declared) is None or int(declared) != count):
+                raise ValueError(f"JUnit {suite.tag} {name} count {declared!r} differs from {count} testcase records")
     found = {}
     for case in root.iter("testcase"):
         name = case.get("name", "")
@@ -38,6 +54,8 @@ def results(path, kind):
             name = f"{classname}/{name}" if name else ""
         if not name or name in found:
             raise ValueError(f"empty or duplicate testcase name: {name!r}")
+        if sum(case.find(tag) is not None for tag in ("failure", "error", "skipped")) > 1:
+            raise ValueError(f"JUnit testcase has conflicting outcomes: {name}")
         if case.find("failure") is not None or case.find("error") is not None:
             status = "failed"
         elif case.find("skipped") is not None:
@@ -121,6 +139,8 @@ def report(inventory_path, junit_path, kind, required, failures_path=None, log_p
                 errors.append(f"XCTest completion is missing: {name}")
                 if case["status"] == "passed":
                     case["status"] = "not_run"
+            elif case["status"] != "passed" and outcomes[name] != case["status"]:
+                errors.append(f"JUnit and XCTest statuses disagree for {name}: {case['status']} versus {outcomes[name]}")
             elif outcomes[name] != "passed":
                 case["status"] = outcomes[name]
     try:
