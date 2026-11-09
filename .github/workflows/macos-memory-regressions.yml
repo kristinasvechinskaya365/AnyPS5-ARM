@@ -16,6 +16,7 @@ on:
       - core/libs/tests/GuestMemory*.cpp
       - core/libs/tests/GuestDirectMemory*.cpp
       - core/libs/tests/GuestFixedMappingValidation.cpp
+      - core/libs/tests/GuestFileMappingValidation.cpp
       - core/libs/prx/libSceAgcDriver/**
       - core/shader/recompiler/**
       - tools/required_test_report.py
@@ -38,9 +39,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 75
     env:
-      BASELINE_REVISION: 1843cb570735e6efa3c8843ef80a98af662a4dda
+      BASELINE_REVISION: 861424137e7b0b801fa1f86958b486292a268a89
       CMAKE_BUILD_PARALLEL_LEVEL: 2
-      REQUIRED_TESTS: '^(guest_memory|guest_mmap_fixed_anonymous|guest_direct_memory_lifecycle|guest_direct_memory_for_app|guest_direct_memory_executable_(transition|aliases|partial_release|replacement|rejections)|guest_fixed_mapping_validation_(direct_flags_covered|direct_flags_overlap|direct_alignment_covered|direct_alignment_overlap|flexible_flags_covered|flexible_flags_overlap|direct_protection_overlap|flexible_protection_overlap|reserve_alignment|controls)|agc_write_tracking|agc_write_tracking_generation_wrap)$'
+      REQUIRED_TESTS: '^(guest_memory|guest_mmap_fixed_anonymous|guest_direct_memory_lifecycle|guest_direct_memory_for_app|guest_direct_memory_executable_(transition|aliases|partial_release|replacement|rejections)|guest_fixed_mapping_validation_(direct_flags_covered|direct_flags_overlap|direct_alignment_covered|direct_alignment_overlap|flexible_flags_covered|flexible_flags_overlap|direct_protection_overlap|flexible_protection_overlap|reserve_alignment|controls)|guest_file_mapping_validation_(shared_covered|shared_overlap|private_covered|private_overlap|controls)|agc_write_tracking|agc_write_tracking_generation_wrap)$'
     steps:
       - name: Check out tested revision and pinned submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -73,9 +74,9 @@ jobs:
           brew install ninja 2>&1 | tee diagnostics/ninja.log
           arch -x86_64 uname -m | tee diagnostics/rosetta-architecture.txt
           test "$(arch -x86_64 uname -m)" = x86_64
-      - name: Prepare the unchanged baseline with the identical fixed-mapping fixture
+      - name: Prepare the unchanged baseline with the identical file-mapping fixture
         run: |
-          git worktree add --detach "$RUNNER_TEMP/direct-memory-baseline" "$BASELINE_REVISION"
+          git worktree add --detach "$RUNNER_TEMP/file-memory-baseline" "$BASELINE_REVISION"
           python3 - <<'PY'
           import hashlib
           import json
@@ -85,7 +86,7 @@ jobs:
           import subprocess
 
           candidate = Path.cwd()
-          baseline = Path(os.environ["RUNNER_TEMP"]) / "direct-memory-baseline"
+          baseline = Path(os.environ["RUNNER_TEMP"]) / "file-memory-baseline"
           revision = os.environ["BASELINE_REVISION"]
           def git(*args, cwd=candidate):
               return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
@@ -112,13 +113,13 @@ jobs:
               dependencies[path] = sha
           if not dependencies:
               raise SystemExit("no pinned submodules were verified")
-          fixture = "core/libs/tests/GuestFixedMappingValidation.cpp"
+          fixture = "core/libs/tests/GuestFileMappingValidation.cpp"
           registration = "core/libs/prx/libkernel/CMakeLists.txt"
           for path in (fixture, registration):
               shutil.copy2(candidate / path, baseline / path)
-          production = "core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp"
+          production = "core/libs/prx/libkernel/DirectMemory/PosixMemory.cpp"
           if git("hash-object", production, cwd=baseline) != git("rev-parse", f"{revision}:{production}"):
-              raise SystemExit("baseline direct-memory implementation was modified")
+              raise SystemExit("baseline POSIX memory implementation was modified")
           data = {"baseline_revision": revision, "candidate_revision": os.environ["GITHUB_SHA"],
                   "fixture_sha256": digest(candidate / fixture),
                   "baseline_fixture_sha256": digest(baseline / fixture),
@@ -126,24 +127,24 @@ jobs:
                   "candidate_production_sha256": digest(candidate / production),
                   "submodules": dependencies}
           if data["fixture_sha256"] != data["baseline_fixture_sha256"]:
-              raise SystemExit("the paired fixed-mapping fixtures differ")
+              raise SystemExit("the paired file-mapping fixtures differ")
           Path("diagnostics/baseline-provenance.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
           PY
-          git diff "$BASELINE_REVISION" -- core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp > diagnostics/direct-memory.patch
-      - name: Build the unchanged baseline runtime and fixed-mapping fixture
+          git diff "$BASELINE_REVISION" -- core/libs/prx/libkernel/DirectMemory/PosixMemory.cpp > diagnostics/posix-memory.patch
+      - name: Build the unchanged baseline runtime and file-mapping fixture
         run: |
-          baseline="$RUNNER_TEMP/direct-memory-baseline"
+          baseline="$RUNNER_TEMP/file-memory-baseline"
           cmake -S "$baseline" -B "$baseline/build-memory" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
             -DPython3_EXECUTABLE="$(command -v python3)" 2>&1 | tee diagnostics/baseline-configure.log
-          cmake --build "$baseline/build-memory" --parallel 2 --target guest_fixed_mapping_validation_tests \
+          cmake --build "$baseline/build-memory" --parallel 2 --target guest_file_mapping_validation_tests \
             2>&1 | tee diagnostics/baseline-build.log
-          file "$baseline/build-memory/tests/guest_fixed_mapping_validation_tests" > diagnostics/baseline-binary.txt
-          lipo "$baseline/build-memory/tests/guest_fixed_mapping_validation_tests" -verify_arch x86_64
-          shasum -a 256 "$baseline/build-memory/tests/guest_fixed_mapping_validation_tests" \
+          file "$baseline/build-memory/tests/guest_file_mapping_validation_tests" > diagnostics/baseline-binary.txt
+          lipo "$baseline/build-memory/tests/guest_file_mapping_validation_tests" -verify_arch x86_64
+          shasum -a 256 "$baseline/build-memory/tests/guest_file_mapping_validation_tests" \
             "$baseline/build-memory/core/libs/libs/unpatched/libc.prx" \
             "$baseline/build-memory/core/libs/libs/unpatched/libkernel.prx" > diagnostics/baseline-runtime-sha256.txt
-      - name: Reproduce every baseline fixed-mapping failure and require the control to pass
+      - name: Reproduce every baseline file-mapping failure and require the control to pass
         run: |
           python3 - <<'PY'
           import json
@@ -152,17 +153,12 @@ jobs:
           import signal
           import subprocess
 
-          binary = Path(os.environ["RUNNER_TEMP"]) / "direct-memory-baseline/build-memory/tests/guest_fixed_mapping_validation_tests"
+          binary = Path(os.environ["RUNNER_TEMP"]) / "file-memory-baseline/build-memory/tests/guest_file_mapping_validation_tests"
           expectations = {
-              "direct_flags_covered": "invalid fixed request was accepted",
-              "direct_flags_overlap": "rejected fixed request changed original mapping metadata",
-              "direct_alignment_covered": "invalid fixed request was accepted",
-              "direct_alignment_overlap": "rejected fixed request changed original mapping metadata",
-              "flexible_flags_covered": "invalid fixed request was accepted",
-              "flexible_flags_overlap": "rejected fixed request changed original mapping metadata",
-              "direct_protection_overlap": "rejected fixed request changed original mapping metadata",
-              "flexible_protection_overlap": "rejected fixed request changed original mapping metadata",
-              "reserve_alignment": "invalid fixed request was accepted",
+              "shared_covered": "rejected file mapping changed original mapping metadata",
+              "shared_overlap": "rejected file mapping changed original mapping metadata",
+              "private_covered": "rejected file mapping changed original mapping metadata",
+              "private_overlap": "rejected file mapping changed original mapping metadata",
               "controls": None,
           }
           cases = []
@@ -178,7 +174,7 @@ jobs:
                   os.killpg(process.pid, signal.SIGKILL)
                   output, _ = process.communicate(timeout=2)
               Path(f"diagnostics/baseline-{name}.log").write_text(output, encoding="utf-8")
-              marker = f"fixed mapping validation failed [{name}]: {failure}" if failure else f"fixed mapping validation {name} passed"
+              marker = f"file mapping validation failed [{name}]: {failure}" if failure else f"file mapping validation {name} passed"
               expected_exit = 1 if failure else 0
               matched = not timed_out and process.returncode == expected_exit and marker in output.splitlines()
               cases.append({"test": name, "command": command, "exit_code": process.returncode,
@@ -186,15 +182,15 @@ jobs:
                             "matched_expectation": matched, "required_diagnostic": marker})
               print(f"baseline {name}: exit={process.returncode}, expected={expected_exit}, matched={matched}")
               print(output)
-          reproduced = len(cases) == 10 and all(case["matched_expectation"] for case in cases)
+          reproduced = len(cases) == 5 and all(case["matched_expectation"] for case in cases)
           data = {"baseline_revision": os.environ["BASELINE_REVISION"], "candidate_revision": os.environ["GITHUB_SHA"],
-                  "expected_failures": 9, "expected_passes": 1, "cases": cases,
+                  "expected_failures": 4, "expected_passes": 1, "cases": cases,
                   "expected_baseline_reproduced": reproduced}
           Path("diagnostics/baseline-report.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("### Unchanged direct-memory baseline\n\nNine specific fixed-mapping failures reproduced and the control passed: " + str(reproduced) + "\n")
+              summary.write("### Unchanged file-mapping baseline\n\nFour specific file-mapping failures reproduced and the control passed: " + str(reproduced) + "\n")
           if not reproduced:
-              raise SystemExit("the baseline must complete all ten cases with exactly the required diagnostics and exit codes")
+              raise SystemExit("the baseline must complete all five cases with exactly the required diagnostics and exit codes")
           PY
       - name: Configure the x86-64 runtime and test inventory
         run: |
@@ -206,8 +202,8 @@ jobs:
         run: |
           cmake --build build-memory --parallel 2 --target guest_memory_tests \
             guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests \
-            guest_direct_memory_executable_tests guest_fixed_mapping_validation_tests agc_write_tracking_tests 2>&1 | tee diagnostics/build.log
-          for binary in guest_memory_tests guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests guest_direct_memory_executable_tests guest_fixed_mapping_validation_tests agc_write_tracking_tests; do
+            guest_direct_memory_executable_tests guest_fixed_mapping_validation_tests guest_file_mapping_validation_tests agc_write_tracking_tests 2>&1 | tee diagnostics/build.log
+          for binary in guest_memory_tests guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests guest_direct_memory_executable_tests guest_fixed_mapping_validation_tests guest_file_mapping_validation_tests agc_write_tracking_tests; do
             file "build-memory/tests/$binary"
             lipo "build-memory/tests/$binary" -verify_arch x86_64
             shasum -a 256 "build-memory/tests/$binary"
@@ -239,6 +235,11 @@ jobs:
             --require guest_fixed_mapping_validation_flexible_protection_overlap \
             --require guest_fixed_mapping_validation_reserve_alignment \
             --require guest_fixed_mapping_validation_controls \
+            --require guest_file_mapping_validation_shared_covered \
+            --require guest_file_mapping_validation_shared_overlap \
+            --require guest_file_mapping_validation_private_covered \
+            --require guest_file_mapping_validation_private_overlap \
+            --require guest_file_mapping_validation_controls \
             --require agc_write_tracking --require agc_write_tracking_generation_wrap
       - name: Upload memory regression diagnostics
         if: always()
@@ -250,7 +251,7 @@ jobs:
             build-memory/CMakeCache.txt
             build-memory/CMakeFiles/CMakeConfigureLog.yaml
             build-memory/Testing/Temporary/
-            ${{ runner.temp }}/direct-memory-baseline/build-memory/CMakeCache.txt
-            ${{ runner.temp }}/direct-memory-baseline/build-memory/CMakeFiles/CMakeConfigureLog.yaml
+            ${{ runner.temp }}/file-memory-baseline/build-memory/CMakeCache.txt
+            ${{ runner.temp }}/file-memory-baseline/build-memory/CMakeFiles/CMakeConfigureLog.yaml
           retention-days: 7
           if-no-files-found: error
