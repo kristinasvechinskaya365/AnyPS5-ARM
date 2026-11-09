@@ -24,7 +24,8 @@ from import_fixture import fixture as import_fixture
 
 
 VECTOR_FLAGS = ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"]
-REQUIRED = ("import", "lifter-smoke", "vector-smoke")
+REQUIRED = ("import", "lifter-smoke", "vector-smoke", "cmpxchg-alias")
+REFERENCES = {"vector-smoke": ("vector_smoke.c", VECTOR_FLAGS), "cmpxchg-alias": ("cmpxchg_alias.c", [])}
 COMPILED_TOOLS = ("guest_clang", "guest_clangxx", "llvm_nm", "llvm_objcopy", "guest_linker")
 TIMEOUT = 30
 
@@ -127,10 +128,10 @@ def compiled_guest(directory, source, flags):
     guesttools.link_executable([str(directory / "main.nid.o")], [str(directory / "libc.prx")], str(directory / "eboot.elf"))
 
 
-def host_reference(directory, tools, commands):
-    binary = directory / "vector-host"
-    run_command([tools["guest_clang"]["path"], "-arch", "x86_64", "-O0", *VECTOR_FLAGS,
-                 "-DMAIN_WRAPPER", HERE / "vector_smoke.c", "-o", binary], directory, "reference-build", commands)
+def host_reference(directory, tools, commands, source, flags):
+    binary = directory / "reference-host"
+    run_command([tools["guest_clang"]["path"], "-arch", "x86_64", "-O0", *flags,
+                 "-DMAIN_WRAPPER", HERE / source, "-o", binary], directory, "reference-build", commands)
     result = run_command([tools["reference_arch"]["path"], "-x86_64", binary], directory, "reference-run", commands, check=False)
     output = result.stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{16}", output) or result.returncode != (int(output, 16) & 0x7f):
@@ -195,7 +196,7 @@ def main(argv=None):
     provenance = {"host": host, "tools": tools, "requested_cpu": args.cpu, "translator": file_identity(build / "aps5-translator"),
                   "runtime": file_identity(build / "libaps5-translator-runtime.a"), "libc": file_identity(libraries / "libc.prx"),
                   "runner": file_identity(pathlib.Path(__file__)), "guesttools": file_identity(pathlib.Path(guesttools.__file__)),
-                  "reference": {"execution": "x86_64 under Rosetta", "optimization": "O0", "flags": VECTOR_FLAGS}}
+                  "reference": {"fixture": "vector-smoke", "execution": "x86_64 under Rosetta", "optimization": "O0", "flags": VECTOR_FLAGS}}
     report = {"schema_version": 1, "suite": "native-arm64", "required_fixtures": list(REQUIRED), "work": str(work),
               "provenance": provenance, "preflight_commands": [], "fixtures": []}
     write_report(report_file, report)
@@ -228,7 +229,7 @@ def main(argv=None):
         directory.mkdir()
         try:
             needed = [] if name == "import" else list(COMPILED_TOOLS)
-            if name == "vector-smoke":
+            if name in REFERENCES:
                 needed.append("reference_arch")
             missing = [tool for tool in needed if not tools[tool]["available"]]
             if blockers or missing:
@@ -242,10 +243,14 @@ def main(argv=None):
                 (directory / "eboot.elf").write_bytes(import_fixture())
                 expected = {"exit_code": 0, "stdout": "hello from a PS5 ELF on macOS"}
             else:
-                source = "lifter_smoke.c" if name == "lifter-smoke" else "vector_smoke.c"
+                source, flags = ("lifter_smoke.c", []) if name == "lifter-smoke" else REFERENCES[name]
                 result["source"] = file_identity(HERE / source)
-                expected = {"exit_code": 28, "stdout": "3b0c6e4bf8726a1c"} if name == "lifter-smoke" else host_reference(directory, tools, result["commands"])
-                compiled_guest(directory, source, () if name == "lifter-smoke" else VECTOR_FLAGS)
+                if name == "lifter-smoke":
+                    expected = {"exit_code": 28, "stdout": "3b0c6e4bf8726a1c"}
+                else:
+                    result["reference"] = {"execution": "x86_64 under Rosetta", "optimization": "O0", "flags": flags}
+                    expected = host_reference(directory, tools, result["commands"], source, flags)
+                compiled_guest(directory, source, flags)
             result["expected"] = expected
             result["stage"] = "translate"
             translate_and_run(build, libraries, directory, expected, tools, args.cpu, result)
