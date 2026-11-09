@@ -42,7 +42,6 @@ macos   agc_shared_write                Cannot inspect mapping lifetimes on macO
 macos   agc_submit_progress(_no_timeline)?  Needs a Vulkan device; the runner has no MoltenVK (also fails on the developers' Macs).
 macos   agc_driver_pipelined_prefetch   Known macOS failure: the AGC FS table cannot be mapped under Rosetta.
 macos   agc_driver_graphics             Known macOS hang: a failed map import is retried and the probe remap deadlocks on the imports mutex.
-macos   guest_memory                    Known macOS failure: mprotect of guest memory is refused (deterministic since the eighth merge).
 macos   guest_kernel_app_archive_mmap   Known macOS failure: mmap of a file read from app0.zar is not implemented there.
 macos   font_face_lifetime(_replace|_churn)?  The test finishes, then its process does not exit within the timeout under Rosetta on the runner.
 macos   guest_memory_lifetime           Its exit probe times out under Rosetta on the runner.

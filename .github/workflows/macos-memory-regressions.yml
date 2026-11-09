@@ -202,6 +202,7 @@ jobs:
         run: |
           python3 tools/required_test_report.py --inventory diagnostics/inventory.json \
             --junit diagnostics/ctest.xml --output diagnostics/report.json \
+            --known-failures .github/anytogether-ci/ctest-known-failures.txt \
             --require guest_memory --require guest_mmap_fixed_anonymous \
             --require guest_direct_memory_lifecycle --require guest_direct_memory_for_app \
             --require guest_direct_memory_executable_transition --require guest_direct_memory_executable_aliases \
