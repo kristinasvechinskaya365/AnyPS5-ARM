@@ -47,6 +47,49 @@ public struct InstallRecord: Codable, Sendable {
     public var update: String? = nil
 }
 
+public struct InstallResult: Codable, Sendable {
+    public let schemaVersion: Int
+    public let executionMode: String
+    public let titleID: String
+    public let source: String
+    public let toolkit: String
+    public let toolkitVersion: String
+    public let engineCommit: String?
+    public let binarySHA256: [String: String]
+    public let bundle: String
+    public let launcher: String
+    public let workingDirectory: String
+    public let leftOut: [LeftOutModule]
+
+    public init(game: Game, toolkit: Toolkit, bundle: URL, leftOut: [LeftOutModule]) throws {
+        schemaVersion = 1
+        executionMode = "rosetta-x86_64"
+        titleID = game.titleID
+        source = game.folder.resolvingSymlinksInPath().path
+        self.toolkit = toolkit.root.resolvingSymlinksInPath().path
+        toolkitVersion = toolkit.version
+        engineCommit = toolkit.manifest?.engineCommit
+        let macOS = bundle.appendingPathComponent("Contents/MacOS")
+        var hashes = ["toolkit/relinker": try FileDigest.sha256(toolkit.relinker),
+                      "bundle/Contents/MacOS/eboot": try FileDigest.sha256(macOS.appendingPathComponent("eboot"))]
+        for file in try FileManager.default.contentsOfDirectory(at: macOS.appendingPathComponent("libs"), includingPropertiesForKeys: nil)
+            where ["prx", "dylib"].contains(file.pathExtension) {
+            hashes["bundle/Contents/MacOS/libs/" + file.lastPathComponent] = try FileDigest.sha256(file)
+        }
+        binarySHA256 = hashes
+        self.bundle = bundle.resolvingSymlinksInPath().path
+        launcher = bundle.appendingPathComponent("Contents/MacOS/run").resolvingSymlinksInPath().path
+        workingDirectory = bundle.appendingPathComponent("Contents/Resources/game").resolvingSymlinksInPath().path
+        self.leftOut = leftOut
+    }
+
+    public func write(to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(self).write(to: url, options: .atomic)
+    }
+}
+
 public struct InstallError: LocalizedError {
     public let message: String
     public init(_ message: String) { self.message = message }
@@ -380,7 +423,34 @@ public final class Installer: @unchecked Sendable {
         return UnlockSpace(executables: executables, libraries: libraries, copied: 0, clones: clones, keptRelink: kept)
     }
 
-    public func run(root: URL) throws -> URL {
+    static func checkOwnedStore(game: Game, toolkit: Toolkit, root: URL) throws {
+        let lexicalRoot = root.standardizedFileURL.pathComponents
+        let resolvedRoot = canonical(root)
+        let store = root.appendingPathComponent(GameLibrary.storeName)
+        let bundle = bundle(for: game, root: root)
+        let data = dataFolder(for: game, root: root)
+        let kept = keptRelink(for: game, root: root)
+        let owned = [store, store.appendingPathComponent("Work"), bundle, bundle.deletingPathExtension().appendingPathExtension("partial"),
+                     data, data.appendingPathComponent("game"), kept, kept.appendingPathComponent("out")]
+        func expected(_ url: URL) -> [String] { resolvedRoot + url.standardizedFileURL.pathComponents.dropFirst(lexicalRoot.count) }
+        for path in owned where canonical(path) != expected(path) {
+            throw InstallError("benchmark install path is redirected outside its owned location: \(path.path)")
+        }
+        let previous = bundle.appendingPathComponent("Contents/Resources/game")
+        if canonical(previous) != expected(previous), canonical(previous) != expected(data.appendingPathComponent("game")) {
+            throw InstallError("benchmark game data is redirected outside its owned location: \(previous.path)")
+        }
+        let storeParts = expected(store)
+        for source in [game.folder, toolkit.root] {
+            let parts = canonical(source)
+            if parts.starts(with: storeParts) || storeParts.starts(with: parts) {
+                throw InstallError("benchmark install store overlaps an input: \(source.path)")
+            }
+        }
+    }
+
+    public func run(root: URL, requireOwnedStore: Bool = false) throws -> URL {
+        if requireOwnedStore { try Installer.checkOwnedStore(game: game, toolkit: toolkit, root: root) }
         let fileManager = FileManager.default
         let bundle = Installer.bundle(for: game, root: root)
         let store = root.appendingPathComponent(GameLibrary.storeName)
@@ -493,9 +563,19 @@ public final class Installer: @unchecked Sendable {
             try choices.write(to: resources.appendingPathComponent("resolution.txt"), atomically: true, encoding: .utf8)
             script += Installer.resolutionChoice
         }
-        script += "exec \"$here/eboot\" \"$@\" >> \"$HOME/Library/Logs/AnyPS5/\(game.titleID).log\" 2>&1\n"
+        script += "exec \"$here/eboot\" \"$@\"\n"
+        let runner = macOS.appendingPathComponent("run")
+        try script.write(to: runner, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runner.path)
+        let loggedScript = """
+        #!/bin/sh
+        here="$(cd "$(dirname "$0")" && pwd)"
+        mkdir -p "$HOME/Library/Logs/AnyPS5"
+        exec "$here/run" "$@" >> "$HOME/Library/Logs/AnyPS5/\(game.titleID).log" 2>&1
+
+        """
         let launcher = macOS.appendingPathComponent("launch")
-        try script.write(to: launcher, atomically: true, encoding: .utf8)
+        try loggedScript.write(to: launcher, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
         progress(.bundle, 0.6)
         let hasIcon = makeIcon(from: app0.appendingPathComponent("sce_sys/icon0.png"), into: resources)
@@ -667,7 +747,7 @@ public final class Installer: @unchecked Sendable {
     /// stand-ins for system libraries, which AnyPS5 implements itself.
     static func moduleDirectories(_ modules: [URL]) -> [String] {
         var directories = ["."]
-        for module in modules where module.pathExtension.lowercased() == "prx" {
+        for module in modules {
             let directory = module.deletingLastPathComponent().relativePath
             let first = directory.split(separator: "/").first.map(String.init) ?? "."
             guard !["sce_module", "sce_modules", "prx", "fakelib"].contains(first.lowercased()), !directories.contains(directory) else { continue }

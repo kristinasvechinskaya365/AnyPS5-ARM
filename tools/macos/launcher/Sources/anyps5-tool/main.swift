@@ -16,7 +16,7 @@ func fail(_ message: String) -> Never {
     exit(2)
 }
 
-let usage = "usage: anyps5-tool unwrap <self> <elf> | scan <games folder> | theme <snd0.at9> <out.wav> | update-check <version> [--download] | toolkit-check <zip> [<store folder>] | engines | install <game folder> <games folder> | remote [--allow-all] [--devices <file>] [--port <port>] [--games <folder> [--language en|tr]] [--hidden]"
+let usage = "usage: anyps5-tool unwrap <self> <elf> | scan <games folder> | theme <snd0.at9> <out.wav> | update-check <version> [--download] | toolkit-check <zip> [<store folder>] | engines | install <game folder> <games folder> [--result <json>] | remote [--allow-all] [--devices <file>] [--port <port>] [--games <folder> [--language en|tr]] [--hidden]"
 
 /// Prints a line at once, so a script reading the output sees it while the server runs.
 func say(_ line: String) {
@@ -43,15 +43,22 @@ case "scan":
         print("\(game.titleID)\t\(game.name)\t\(game.executable)\t\(installed ? "installed" : "locked")\t\(game.folder.path)")
     }
 case "install":
-    guard arguments.count == 3 else { fail(usage) }
+    guard arguments.count == 3 || (arguments.count == 5 && arguments[3] == "--result") else { fail(usage) }
     guard let toolkit = Toolkit.locate() else { fail("no toolkit: set ANYPS5_TOOLKIT") }
     guard let game = GameLibrary.inspect(URL(fileURLWithPath: arguments[1])) else { fail("not a game folder: \(arguments[1])") }
+    if arguments.count == 5, game.update != nil || !game.addons.isEmpty {
+        fail("FAIL: benchmark installation does not support adjacent updates or add-ons")
+    }
     let installer = Installer(game: game, toolkit: toolkit, progress: { step, fraction in
         print(String(format: "[%@ %3.0f%%]", "\(step)", fraction * 100))
     }, log: { line in print(line) })
     do {
         let started = Date()
-        let bundle = try installer.run(root: URL(fileURLWithPath: arguments[2]))
+        let bundle = try installer.run(root: URL(fileURLWithPath: arguments[2]), requireOwnedStore: arguments.count == 5)
+        if arguments.count == 5 {
+            try InstallResult(game: game, toolkit: toolkit, bundle: bundle, leftOut: installer.leftOut)
+                .write(to: URL(fileURLWithPath: arguments[4]))
+        }
         print("installed \(bundle.path) in \(String(format: "%.1f", Date().timeIntervalSince(started))) s")
     } catch {
         fail("FAIL: \(error.localizedDescription)")

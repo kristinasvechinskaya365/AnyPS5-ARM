@@ -62,6 +62,7 @@ class TitlesTests(unittest.TestCase):
     def test_default_entry(self):
         self.assertEqual(title_run.relink_args({}, "windows"), ["--windows"])
         self.assertEqual(title_run.relink_args({}, "linux"), [])
+        self.assertEqual(title_run.relink_args({}, "macos"), ["--macos", "--to-rosetta"])
 
     def test_entry_on_windows_and_linux(self):
         entry = {"relink": ["--registry"], "fixed_base": "0x400000", "executables": ["picker/picker.bin"]}
@@ -206,6 +207,18 @@ class ReportTests(unittest.TestCase):
                           "PPSA97358": {"name": "XPSemu", "version": "A2.1", "runs": [run("stalled"), run("stalled", "warm")]}})
         self.assertIn("Missing: XPSemu (PPSA97358)", title_run.render_markdown(now, before))
 
+    def test_macos_report_separates_the_toolkit_from_runner_source(self):
+        now = summary({"PPSA00001": {"name": "Game", "version": "1", "runs": [run("crashed")],
+                                     "installation": {"toolkitVersion": "engine-2"}}})
+        now["macos"] = {"execution_mode": "rosetta-x86_64"}
+        report = title_run.render_markdown(now)
+        self.assertIn("AnyPS5 macOS toolkit `engine-2`.", report)
+        self.assertIn("Engine commit (declared by toolkit manifest): unknown.", report)
+        self.assertIn("Runner source `abc1234`", report)
+        self.assertNotIn("AnyPS5 `abc1234`", report)
+        now["titles"]["PPSA00001"]["installation"]["engineCommit"] = "b" * 40
+        self.assertIn("Engine commit (declared by toolkit manifest): " + "b" * 40, title_run.render_markdown(now))
+
 
 def package(root, title_id, version="01.000.000", name="Game"):
     (root / "sce_sys").mkdir(parents=True)
@@ -231,7 +244,7 @@ class PreparationTests(unittest.TestCase):
         held = title_run.lock_work(out / "work/PPSA00001.lock")
         self.addCleanup(held.close)
         self.assertIsNotNone(held)
-        with self.assertRaisesRegex(SystemExit, "already running in .*: PPSA00001"):
+        with unittest.mock.patch.object(title_run.sys, "platform", "linux"), self.assertRaisesRegex(SystemExit, "already running in .*: PPSA00001"):
             title_run.main(["--games", str(self.root / "games"), "--out", str(out), "PPSA00001"])
         self.assertEqual(marker.read_bytes(), b"running")
         held.close()
@@ -287,6 +300,261 @@ class PreparationTests(unittest.TestCase):
         self.assertTrue((self.root / "app0/sce_sys/param.json").is_file())
         self.assertTrue((self.root / "app0/eboot.bin").is_file())
         self.assertFalse((self.root / "app0/sce_module").exists())
+
+
+class MacPreparationTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.dump = package(self.root / "dump with spaces", "PPSA00001")
+        self.toolkit = self.root / "toolkit"
+        self.toolkit.mkdir()
+        self.tool = self.root / "anyps5-tool"
+        for file in (self.tool, self.toolkit / "relinker"):
+            file.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            file.chmod(0o755)
+        self.work = self.root / "out/work/PPSA00001"
+
+    def installed(self):
+        bundle = self.work / ".AnyPS5/Games/PPSA00001-fixture.app"
+        launcher = bundle / "Contents/MacOS/run"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        executable = launcher.with_name("eboot")
+        executable.write_bytes(struct.pack("<IIIIIIII", 0xFEEDFACF, 0x01000007, 3, 2, 0, 0, 0, 0))
+        runtime = bundle / "Contents/Resources/game"
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"schemaVersion": 1, "executionMode": "rosetta-x86_64", "titleID": "PPSA00001", "source": str(self.dump.resolve()),
+                "toolkit": str(self.toolkit.resolve()), "toolkitVersion": "fixture-1", "bundle": str(bundle.resolve()),
+                "launcher": str(launcher.resolve()), "workingDirectory": str(runtime.resolve()),
+                "binarySHA256": {"toolkit/relinker": title_run.file_sha256(self.toolkit / "relinker"),
+                                 "bundle/Contents/MacOS/eboot": title_run.file_sha256(executable)},
+                "leftOut": [{"path": "Media/Plugins/encrypted.sprx", "reason": "encrypted"}]}
+
+    def install(self, command, **kwargs):
+        result_file = Path(command[-1])
+        self.assertFalse(result_file.exists())
+        result_file.write_text(json.dumps(self.installed()), encoding="utf-8")
+        kwargs["stdout"].write("raw installer output\n")
+        return subprocess.CompletedProcess(command, 0)
+
+    def prepare(self, entry=None):
+        return title_run.prepare_macos("PPSA00001", {"package": self.dump}, entry or {}, self.tool, self.toolkit, self.work)
+
+    def test_installer_contract_preserves_relinks_saves_and_source(self):
+        result = self.installed()
+        kept = self.work / ".AnyPS5/Relinked/kept"
+        kept.parent.mkdir()
+        kept.write_bytes(b"compiled")
+        save = Path(result["workingDirectory"]) / "_sd/save"
+        save.parent.mkdir()
+        save.write_bytes(b"saved game")
+        original = (self.dump / "eboot.bin").read_bytes()
+        with unittest.mock.patch.object(title_run.subprocess, "run", side_effect=self.install) as invoked:
+            for _ in range(2):
+                cache = self.work / "shader-cache/old"
+                cache.parent.mkdir()
+                cache.write_bytes(b"shader")
+                (self.work / "install.json").write_text("stale result", encoding="utf-8")
+                self.assertEqual(self.prepare(), result)
+                self.assertFalse(cache.parent.exists())
+            command = invoked.call_args.args[0]
+            self.assertEqual(command, [str(self.tool.resolve()), "install", str(self.dump.resolve()), str(self.work), "--result", str(self.work / "install.json")])
+            self.assertEqual(invoked.call_args.kwargs["env"]["ANYPS5_TOOLKIT"], str(self.toolkit.resolve()))
+            self.assertEqual(invoked.call_args.kwargs["stderr"], subprocess.STDOUT)
+        self.assertEqual(kept.read_bytes(), b"compiled")
+        self.assertEqual(save.read_bytes(), b"saved game")
+        self.assertEqual((self.dump / "eboot.bin").read_bytes(), original)
+        self.assertEqual((self.work / "relink.log").read_text(encoding="utf-8"), "raw installer output\n")
+
+    def test_unrepresentable_title_settings_are_refused_before_installing(self):
+        entries = [{"relink": ["--registry"]}, {"fixed_base": "0x400000"}, {"fixed_base": ""},
+                   {"executables": ["picker.bin"]}, {"env": {"ANYPS5_SHADER_CACHE_DIR": "/shared"}},
+                   {"env": {"ANYPS5_NO_SHADER_CACHE": "1"}}, {"env": {"ANYPS5_UPDATE_DIR": "/update"}},
+                   {"env": {"ANYPS5_ADDCONT_DIRS": "/dlc"}}]
+        with unittest.mock.patch.object(title_run.subprocess, "run") as invoked:
+            for entry in entries:
+                with self.subTest(entry=entry), self.assertRaises(ValueError):
+                    self.prepare(entry)
+            invoked.assert_not_called()
+        self.assertFalse(self.work.exists())
+
+    def test_output_cannot_overlap_inputs(self):
+        original = (self.dump / "eboot.bin").read_bytes()
+        for work in (self.dump, self.dump / "runs", self.dump.parent, self.toolkit / "runs"):
+            with self.subTest(work=work), self.assertRaisesRegex(ValueError, "overlap"):
+                title_run.check_macos_paths(self.dump, self.tool, self.toolkit, work)
+        self.assertEqual((self.dump / "eboot.bin").read_bytes(), original)
+        self.assertFalse((self.dump / "runs").exists())
+
+    @unittest.skipIf(os.name == "nt", "symlink creation requires a Windows privilege")
+    def test_output_and_store_links_cannot_escape_into_inputs(self):
+        link = self.root / "linked-output"
+        link.symlink_to(self.dump, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            title_run.check_macos_paths(self.dump, self.tool, self.toolkit, link)
+        self.work.mkdir(parents=True)
+        (self.work / ".AnyPS5").symlink_to(self.dump, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "store must stay inside"):
+            self.prepare()
+
+    @unittest.skipIf(os.name == "nt", "symlink creation requires a Windows privilege")
+    def test_mutable_files_cannot_redirect_writes_into_the_dump(self):
+        self.work.mkdir(parents=True)
+        original = (self.dump / "eboot.bin").read_bytes()
+        for name in ("relink.log", "install.json", "pad-input.txt", "shader-cache"):
+            path = self.work / name
+            path.symlink_to(self.dump / "eboot.bin")
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "redirected or shared"):
+                self.prepare()
+            path.unlink()
+        os.link(self.dump / "eboot.bin", self.work / "relink.log")
+        with self.assertRaisesRegex(ValueError, "redirected or shared"):
+            self.prepare()
+        self.assertEqual((self.dump / "eboot.bin").read_bytes(), original)
+
+    @unittest.skipIf(os.name == "nt", "macOS CLI selection requires a POSIX host")
+    def test_main_refuses_a_log_link_before_its_first_write(self):
+        self.work.mkdir(parents=True)
+        (self.work / "relink.log").symlink_to(self.dump / "eboot.bin")
+        original = (self.dump / "eboot.bin").read_bytes()
+        titles = self.root / "titles.json"
+        titles.write_text("{}", encoding="utf-8")
+        with unittest.mock.patch.object(title_run.sys, "platform", "darwin"), self.assertRaisesRegex(ValueError, "redirected or shared"):
+            title_run.main(["--games", str(self.dump), "--out", str(self.root / "out"), "--titles", str(titles),
+                            "--macos-tool", str(self.tool), "--toolkit", str(self.toolkit)])
+        self.assertEqual((self.dump / "eboot.bin").read_bytes(), original)
+
+    def test_failed_install_cannot_reuse_a_stale_result(self):
+        self.installed()
+        (self.work / "install.json").write_text("stale result", encoding="utf-8")
+
+        def fail(command, **kwargs):
+            kwargs["stdout"].write("FAIL: conversion failed\n")
+            return subprocess.CompletedProcess(command, 2)
+
+        with unittest.mock.patch.object(title_run.subprocess, "run", side_effect=fail):
+            self.assertIsNone(self.prepare())
+        self.assertFalse((self.work / "install.json").exists())
+        self.assertEqual((self.work / "relink.log").read_text(encoding="utf-8"), "FAIL: conversion failed\n")
+
+    def test_result_rejects_mismatched_or_unsafe_installations(self):
+        original = self.installed()
+        cases = [{}, {"schemaVersion": 2}, {"schemaVersion": True}, {"titleID": "PPSA00002"}, {"executionMode": "native-arm64"},
+                 {"source": str(self.root)}, {"toolkit": str(self.root)}, {"launcher": "relative/run"},
+                 {"workingDirectory": str(self.dump)}, {"bundle": str(self.root)}, {"toolkitVersion": None}, {"leftOut": None},
+                 {"engineCommit": 1}, {"binarySHA256": {}}, {"binarySHA256": {"toolkit/relinker": "bad"}}]
+        for updates in cases:
+            result = {**original, **updates} if updates else []
+            path = self.work / "install.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                title_run.read_install_result(path, "PPSA00001", self.dump, self.toolkit, self.work)
+
+    def test_result_checks_the_executable_architecture(self):
+        result = self.installed()
+        path = self.work / "install.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        executable = Path(result["bundle"]) / "Contents/MacOS/eboot"
+        cases = [b"\x7fELF" + bytes(28), bytes(4),
+                 struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0),
+                 struct.pack("<IIIIIIII", 0xFEEDFACF, 0x01000007, 3, 6, 0, 0, 0, 0)]
+        for contents in cases:
+            executable.write_bytes(contents)
+            with self.subTest(contents=contents), self.assertRaisesRegex(ValueError, "not a thin x86_64 Mach-O executable"):
+                title_run.read_install_result(path, "PPSA00001", self.dump, self.toolkit, self.work)
+
+    @unittest.skipIf(os.name == "nt", "macOS CLI selection requires a POSIX host")
+    def test_main_records_toolkit_identity_and_keeps_the_second_cache_warm(self):
+        titles = self.root / "titles.json"
+        titles.write_text("{}", encoding="utf-8")
+        installation = self.installed()
+        frozen = title_run.datetime.datetime(2026, 1, 2, 3, 4, 5)
+        old_report = self.root / "out/runner-revision-20260102-030405"
+        old_report.symlink_to(self.dump, target_is_directory=True)
+        original = (self.dump / "eboot.bin").read_bytes()
+        cache = self.work / "shader-cache/shader"
+        cache.parent.mkdir()
+        cache.write_bytes(b"stale")
+        observed = []
+
+        def run_title(executable, work, run_dir, seconds, env, pad, runtime=None):
+            self.assertEqual(executable, Path(installation["launcher"]))
+            self.assertEqual(runtime, Path(installation["workingDirectory"]))
+            observed.append(cache.exists())
+            cache.parent.mkdir(exist_ok=True)
+            cache.write_bytes(b"new")
+            return {"outcome": "crashed", "exit_code": 7, "seconds": 0, "presents": 0, "fps": 0.0, "first_error": "",
+                    "warnings": {}, "frames": [], "os": "macOS", "gpu": "fixture", "driver": "fixture", "cpu": "fixture"}
+
+        def git(root, *args):
+            self.assertEqual(root, title_run.ROOT)
+            return "runner-revision" if args[0] == "rev-parse" else ""
+
+        with unittest.mock.patch.object(title_run.sys, "platform", "darwin"), unittest.mock.patch.object(title_run, "git", side_effect=git), \
+                unittest.mock.patch.object(title_run.subprocess, "run", side_effect=self.install), \
+                unittest.mock.patch.object(title_run, "run_title", side_effect=run_title), unittest.mock.patch("builtins.print"), \
+                unittest.mock.patch.object(title_run.datetime, "datetime", wraps=title_run.datetime.datetime) as clock:
+            clock.now.return_value = frozen
+            self.assertEqual(title_run.main(["--games", str(self.dump), "--out", str(self.root / "out"), "--titles", str(titles),
+                                             "--macos-tool", str(self.tool), "--toolkit", str(self.toolkit), "--runs", "2"]), 0)
+        self.assertEqual(observed, [False, True])
+        self.assertEqual((self.dump / "eboot.bin").read_bytes(), original)
+        self.assertFalse((self.dump / "summary.json").exists())
+        report = next((self.root / "out").glob("*/summary.json"))
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["build"]["commit"], "runner-revision")
+        self.assertEqual(data["titles"]["PPSA00001"]["installation"], installation)
+        self.assertEqual(json.loads((report.parent / "PPSA00001/install.json").read_text(encoding="utf-8")), installation)
+        self.assertEqual(data["macos"]["tool_sha256"], title_run.file_sha256(self.tool))
+        self.assertIn("AnyPS5 macOS toolkit `fixture-1`", (report.parent / "summary.md").read_text(encoding="utf-8"))
+        handle = title_run.lock_work(self.work.with_suffix(".lock"))
+        self.assertIsNotNone(handle)
+        handle.close()
+
+    @unittest.skipIf(os.name == "nt", "macOS CLI selection requires a POSIX host")
+    def test_main_keeps_installer_output_when_result_decoding_fails(self):
+        titles = self.root / "titles.json"
+        titles.write_text("{}", encoding="utf-8")
+
+        def malformed(command, **kwargs):
+            kwargs["stdout"].write("raw conversion details\n")
+            Path(command[-1]).write_text("not json", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+
+        with unittest.mock.patch.object(title_run.sys, "platform", "darwin"), unittest.mock.patch.object(title_run, "git", return_value="fixture"), \
+                unittest.mock.patch.object(title_run.subprocess, "run", side_effect=malformed), unittest.mock.patch("builtins.print"):
+            self.assertEqual(title_run.main(["--games", str(self.dump), "--out", str(self.root / "out"), "--titles", str(titles),
+                                             "--macos-tool", str(self.tool), "--toolkit", str(self.toolkit), "--runs", "1"]), 0)
+        report = next((self.root / "out").glob("*/summary.json"))
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["titles"]["PPSA00001"]["runs"][0]["outcome"], "relink-failed")
+        self.assertEqual(data["driver_cache"], "uncontrolled (macOS/Metal)")
+        self.assertFalse(data["macos"]["audio_validated"])
+        self.assertEqual(data["build"]["component"], "runner-source")
+        log = (report.parent / "PPSA00001/relink.log").read_text(encoding="utf-8")
+        self.assertTrue(log.startswith("raw conversion details\n"))
+        self.assertIn("JSONDecodeError:", log)
+
+    @unittest.skipIf(os.name == "nt", "POSIX launch script")
+    def test_run_captures_direct_output_and_frames_from_runtime(self):
+        installation = self.installed()
+        launcher, runtime = Path(installation["launcher"]), Path(installation["workingDirectory"])
+        launcher.write_text('#!/bin/sh\nif [ -n "$ANYPS5_UPDATE_DIR$ANYPS5_ADDCONT_DIRS" ]; then exit 9; fi\nprintf "raw stdout\\n%s\\n%s\\n" "$PWD" "$ANYPS5_SHADER_CACHE_DIR"\nprintf "raw stderr\\n" >&2\nexit 7\n', encoding="utf-8")
+        bmp(runtime / "frame_1.bmp", 4, 4, lambda x, y: (x * 40, y * 40, 0))
+        run_dir = self.root / "run1"
+        with unittest.mock.patch.dict(os.environ, {"ANYPS5_UPDATE_DIR": "/ambient/update", "ANYPS5_ADDCONT_DIRS": "/ambient/dlc"}):
+            result = title_run.run_title(launcher, self.work, run_dir, 1, {}, runtime=runtime)
+        self.assertEqual(result["exit_code"], 7)
+        self.assertEqual(result["outcome"], "crashed")
+        self.assertEqual(result["frames"], ["frame_1.bmp"])
+        self.assertFalse((runtime / "frame_1.bmp").exists())
+        self.assertEqual((run_dir / "stdout.log").read_text(encoding="utf-8"), f"raw stdout\n{runtime}\n{self.work / 'shader-cache'}\n")
+        self.assertEqual((run_dir / "stderr.log").read_text(encoding="utf-8"), "raw stderr\n")
+        self.assertEqual(result["audio_driver"], "dummy")
+        self.assertFalse(result["audio_validated"])
 
 
 def wait_until(condition, seconds=10):

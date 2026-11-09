@@ -22,6 +22,31 @@ For user options see [USAGE](../user/USAGE.md); for internals see [ARCHITECTURE]
 
 ## Launch
 
+### Repeatable macOS runs
+
+Build the command-line launcher from the same checkout, and supply a complete macOS toolkit (the relinker, PRX libraries, patched Vulkan loader and MoltenVK, driver manifest, and patches):
+
+```sh
+swift build --package-path tools/macos/launcher --product anyps5-tool --jobs 2
+python3 tools/title_run.py PPSA00001 --games /path/to/dumps \
+  --macos-tool tools/macos/launcher/.build/debug/anyps5-tool \
+  --toolkit /path/to/toolkit --out /path/to/title-runs --runs 2 --seconds 60
+```
+
+The runner calls `anyps5-tool install <dump> <store> --result <json>`, using the launcher's installer and its `--macos --to-rosetta` conversion. This runs the converted x86_64 executable through Rosetta on Apple silicon. The installer discovers modules in the dump's root, standard module folders, and folders such as `Media/Modules` and `Media/Plugins`, within its existing three-level search limit. Encrypted modules and modules the relinker cannot convert are recorded in the result's `leftOut` list; successful installation alone does not establish that a game can run without them.
+
+Each title keeps its installation under `--out/work/<title ID>`. APFS relink reuse and the installer's clone/link policy remain in use, so subsequent measurements do not discard the converted files or duplicate the whole dump. Saves are retained. Keep `--out` separate from the dump and toolkit. The runner refuses overlapping paths before installing.
+
+The runner checks that the installed executable has an x86_64 Mach-O executable header, then starts the bundle's `Contents/MacOS/run` directly, captures stdout and stderr into each run's files, collects frames from the installed game directory, and closes the process group at the time cap. Finder still starts `Contents/MacOS/launch`, which appends both streams to the normal title log. Each title report includes `install.json` with the toolkit version, source and installation paths, execution mode, omitted modules, and SHA256 hashes measured from the relinker, installed executable, and installed host PRX and Vulkan libraries. These hashes describe the files at installation time, before any launch-time resolution patch.
+
+macOS reports label the runner's source revision separately from the toolkit. An engine commit is included only when the toolkit manifest declares one; that declaration is not a verification that the binaries were built from that source. Without it, the engine commit is unknown. The JSON also records the `anyps5-tool` binary's SHA256.
+
+The first run clears only the runner's per-title AnyPS5 shader cache; subsequent runs reuse it. macOS and Metal driver caches remain uncontrolled. Audio uses SDL's dummy driver by default and is not validated by these runs. The report records that limit even if an environment override selects a different audio driver.
+
+This benchmark installer interface does not accept adjacent update or add-on folders, or the title configuration's custom `relink`, `fixed_base`, or `executables` settings. The runner reports `relink-failed` when a title requests them, with the unsupported settings in `relink.log`. Use `--titles /path/to/macos-titles.json` for a configuration containing only the settings this path can honor (`seconds`, `env`, and `pad`); `{}` selects the defaults. Shader-cache and update/add-on environment overrides in that configuration are refused; ambient update/add-on variables are removed. Normal launcher installation and `anyps5-tool install` without `--result` retain their update/add-on behavior.
+
+### Manual launches
+
 Linux:
 
 ```sh

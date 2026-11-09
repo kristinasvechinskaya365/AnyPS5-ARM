@@ -1,5 +1,7 @@
 import argparse
 import datetime
+from contextlib import ExitStack
+import hashlib
 import json
 import os
 import re
@@ -8,6 +10,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -61,7 +64,7 @@ def load_titles(path):
 
 
 def relink_args(entry, platform):
-    args = ["--windows"] if platform == "windows" else []
+    args = {"windows": ["--windows"], "macos": ["--macos", "--to-rosetta"]}.get(platform, [])
     args += entry.get("relink", [])
     if "fixed_base" in entry:
         if platform not in FIXED_BASE_FLAGS:
@@ -163,12 +166,22 @@ def compare(summary, previous):
 
 def render_markdown(summary, previous=None):
     build, machine = summary["build"], summary["machine"]
-    header = f"AnyPS5 `{build['commit']}`" + (" (dirty)" if build["dirty"] else "") + (f", {build['note']}" if build["note"] else "")
+    if "macos" in summary:
+        installations = [title["installation"] for title in summary["titles"].values() if "installation" in title]
+        versions = ", ".join(f"`{version}`" for version in sorted({item["toolkitVersion"] for item in installations})) or "unknown"
+        commits = ", ".join(sorted({item.get("engineCommit") or "unknown" for item in installations})) or "unknown"
+        header = f"AnyPS5 macOS toolkit {versions}. Engine commit (declared by toolkit manifest): {commits}. Runner source `{build['commit']}`"
+    else:
+        header = f"AnyPS5 `{build['commit']}`"
+    header += (" (dirty)" if build["dirty"] else "") + (f", {build['note']}" if build["note"] else "")
     parts = [machine["os"], machine["gpu"], machine["driver"] and f"driver {machine['driver']}", machine["cpu"] and f"CPU {machine['cpu']}"]
     known = ", ".join(part for part in parts if part)
     header += f". {known}." if known else "."
     header += f" {summary['runs']} run{'' if summary['runs'] == 1 else 's'} per title, {summary['seconds']} s each."
     lines = [header, ""]
+    if "macos" in summary:
+        lines += ["macOS execution: Rosetta x86_64. The AnyPS5 shader cache starts empty; OS/Metal caches are uncontrolled. "
+                  "Audio output is not validated (dummy driver by default). Toolkit details and omitted modules are in each title's install.json.", ""]
     columns = ["Title", "ID", "Version", "Cold", "Warm", "FPS", "First error"] + (["Before"] if previous else [])
     if previous:
         regressions, improvements = compare(summary, previous)
@@ -285,6 +298,103 @@ def prepare(title_id, found, entry, platform, build, work):
         for name in ("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll"):
             link_file(runtime / name, libs / name)
     return executable
+
+
+def check_macos_paths(package, tool, toolkit, work):
+    package, tool, toolkit, work = (path.resolve() for path in (package, tool, toolkit, work))
+    for relative in (".AnyPS5", ".AnyPS5/Games", ".AnyPS5/Data", ".AnyPS5/Relinked", ".AnyPS5/Work"):
+        if not (work / relative).resolve().is_relative_to(work):
+            raise ValueError("macOS install store must stay inside the output folder")
+    for name in ("relink.log", "install.json", "pad-input.txt", "shader-cache"):
+        path = work / name
+        if not path.resolve().is_relative_to(work) or (path.is_file() and path.stat().st_nlink != 1):
+            raise ValueError(f"macOS output path is redirected or shared with another file: {path}")
+    for source in (package, toolkit):
+        for target in (work, (work / ".AnyPS5").resolve()):
+            if target.is_relative_to(source) or source.is_relative_to(target):
+                raise ValueError(f"macOS output must not overlap the dump or toolkit: {target} and {source}")
+    if tool.is_relative_to(work):
+        raise ValueError("--macos-tool must be outside the output folder")
+    for executable in (tool, toolkit / "relinker"):
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError(f"not an executable file: {executable}")
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_install_result(path, title_id, package, toolkit, work):
+    result = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(result, dict) or type(result.get("schemaVersion")) is not int or result["schemaVersion"] != 1:
+        raise ValueError("unsupported macOS install result schema")
+    if result.get("titleID") != title_id or result.get("executionMode") != "rosetta-x86_64":
+        raise ValueError("macOS install result does not match the title or execution mode")
+    paths = {}
+    for key in ("source", "toolkit", "bundle", "launcher", "workingDirectory"):
+        value = result.get(key)
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise ValueError(f"macOS install result has no absolute {key} path")
+        paths[key] = Path(value).resolve()
+    if paths["source"] != package.resolve() or paths["toolkit"] != toolkit.resolve():
+        raise ValueError("macOS install result does not match the dump or toolkit")
+    if not isinstance(result.get("toolkitVersion"), str) or not isinstance(result.get("leftOut"), list):
+        raise ValueError("macOS install result has no toolkit version or omitted module list")
+    if result.get("engineCommit") is not None and not isinstance(result["engineCommit"], str):
+        raise ValueError("macOS install result has an invalid engine commit")
+    hashes = result.get("binarySHA256")
+    if not isinstance(hashes, dict) or not {"toolkit/relinker", "bundle/Contents/MacOS/eboot"} <= hashes.keys() or \
+            not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values()):
+        raise ValueError("macOS install result has no binary SHA256 records")
+    if not paths["bundle"].is_relative_to(work.resolve() / ".AnyPS5/Games"):
+        raise ValueError("macOS installed bundle is outside the title's work folder")
+    expected = {"launcher": "Contents/MacOS/run", "workingDirectory": "Contents/Resources/game"}
+    for key, relative in expected.items():
+        if paths[key] != (paths["bundle"] / relative).resolve() or not paths[key].is_relative_to(work.resolve()):
+            raise ValueError(f"macOS {key} is outside the installed runtime")
+    if not paths["launcher"].is_file() or not os.access(paths["launcher"], os.X_OK) or not paths["workingDirectory"].is_dir():
+        raise ValueError("macOS install result has no runnable installation")
+    executable = (paths["bundle"] / "Contents/MacOS/eboot").resolve()
+    if not executable.is_relative_to(paths["bundle"]):
+        raise ValueError("macOS executable is outside the installed bundle")
+    with executable.open("rb") as file:
+        header = file.read(32)
+    if len(header) != 32 or struct.unpack_from("<I", header)[0] != 0xFEEDFACF or \
+            struct.unpack_from("<I", header, 4)[0] != 0x01000007 or struct.unpack_from("<I", header, 12)[0] != 2:
+        raise ValueError("macOS executable is not a thin x86_64 Mach-O executable")
+    return result
+
+
+def prepare_macos(title_id, found, entry, tool, toolkit, work):
+    package = found["package"].resolve()
+    check_macos_paths(package, tool, toolkit, work)
+    unsupported = [key for key in ("relink", "fixed_base", "executables") if key in entry and (key == "fixed_base" or entry[key])]
+    if unsupported:
+        raise ValueError(f"macOS installer cannot represent title settings: {', '.join(unsupported)}")
+    managed = {"ANYPS5_SHADER_CACHE_DIR", "ANYPS5_NO_SHADER_CACHE", "ANYPS5_UPDATE_DIR", "ANYPS5_ADDCONT_DIRS"} & entry.get("env", {}).keys()
+    if managed:
+        raise ValueError(f"macOS benchmark does not accept these environment overrides: {', '.join(sorted(managed))}")
+    work.mkdir(parents=True, exist_ok=True)
+    result_file = work / "install.json"
+    result_file.unlink(missing_ok=True)
+    with (work / "relink.log").open("w", encoding="utf-8") as log:
+        installed = subprocess.run([str(tool.resolve()), "install", str(package), str(work), "--result", str(result_file)],
+                                   env={**os.environ, "ANYPS5_TOOLKIT": str(toolkit.resolve())}, stdout=log, stderr=subprocess.STDOUT)
+    if installed.returncode != 0:
+        return None
+    result = read_install_result(result_file, title_id, package, toolkit, work)
+    shader_cache = work / "shader-cache"
+    if shader_cache.is_symlink():
+        shader_cache.unlink()
+    elif shader_cache.exists():
+        shutil.rmtree(shader_cache)
+    for frame in Path(result["workingDirectory"]).glob("frame_*.bmp"):
+        frame.unlink()
+    return result
 
 
 if os.name == "nt":
@@ -456,19 +566,24 @@ def collect_frames(work, destination):
     return kept
 
 
-def run_title(executable, work, run_dir, seconds, extra_env, pad=None):
+def run_title(executable, work, run_dir, seconds, extra_env, pad=None, runtime=None):
     run_dir.mkdir(parents=True)
-    inherited = {key: value for key, value in os.environ.items() if key not in ("ANYPS5_SHADER_CACHE_DIR", "ANYPS5_NO_SHADER_CACHE", "APS5_PAD_INPUT_FILE")}
+    excluded = {"ANYPS5_SHADER_CACHE_DIR", "ANYPS5_NO_SHADER_CACHE", "APS5_PAD_INPUT_FILE"}
+    if runtime is not None:
+        excluded.update(("ANYPS5_UPDATE_DIR", "ANYPS5_ADDCONT_DIRS"))
+    inherited = {key: value for key, value in os.environ.items() if key not in excluded}
     env = {**inherited, "SDL_AUDIODRIVER": "dummy", "SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN": "1",
            "APS5_TRACE_SUMMARY_EVERY": "10", "APS5_TRACE_DIR": str(run_dir), **FRAME_ENV,
            "MESA_SHADER_CACHE_DIR": str(work / "driver-cache"), "__GL_SHADER_DISK_CACHE_PATH": str(work / "driver-cache"), **extra_env}
+    if runtime is not None:
+        env["ANYPS5_SHADER_CACHE_DIR"] = str(work / "shader-cache")
     pad_file, queued = work / "pad-input.txt", None
     if pad:
         pad_file.unlink(missing_ok=True)
         env["APS5_PAD_INPUT_FILE"] = str(pad_file)
     started = time.monotonic()
     with (run_dir / "stdout.log").open("wb") as stdout, (run_dir / "stderr.log").open("wb") as stderr:
-        session = Session([str(executable)], work, env, stdout, stderr, owned=work)
+        session = Session([str(executable)], runtime or work, env, stdout, stderr, owned=work)
         try:
             while session.alive() and time.monotonic() - started < seconds:
                 if pad and queued is None and time.monotonic() - started >= pad.get("after_s", PAD_AFTER_SECONDS):
@@ -489,14 +604,15 @@ def run_title(executable, work, run_dir, seconds, extra_env, pad=None):
     text = "".join((run_dir / name).read_text(encoding="utf-8", errors="replace") for name in ("stdout.log", "stderr.log"))
     summary_path = run_dir / "aps5-summary.jsonl"
     summary = read_summary(summary_path)
-    frames = collect_frames(work, run_dir / "frames")
+    frames = collect_frames(runtime or work, run_dir / "frames")
     uniform = frame_is_uniform(run_dir / "frames" / frames[-1]) if frames else None
     age = ended - summary_path.stat().st_mtime if summary_path.is_file() else None
     cpu = re.search(r"host CPU (.+?): has", text)
     return {"outcome": classify(True, exit_code, age, bool(frames), uniform), "exit_code": exit_code, "seconds": elapsed,
             "presents": summary["presents"], "fps": summary["fps"], "first_error": first_error(text),
             "warnings": warning_counts(text), "frames": frames, "gpu": summary["gpu"], "driver": summary["driver"],
-            "os": summary["os"], "cpu": cpu.group(1) if cpu else "", **({"pad_queued_s": queued} if pad else {})}
+            "os": summary["os"], "cpu": cpu.group(1) if cpu else "", "audio_driver": env["SDL_AUDIODRIVER"],
+            "audio_validated": False, **({"pad_queued_s": queued} if pad else {})}
 
 
 def source_root(build):
@@ -535,6 +651,8 @@ def main(argv=None):
     parser.add_argument("ids", nargs="*", help="title IDs to run (default: every title found)")
     parser.add_argument("--games", action="append", type=Path, required=True, help="directory searched for extracted packages")
     parser.add_argument("--build", type=Path, default=ROOT / "build")
+    parser.add_argument("--macos-tool", type=Path, help="anyps5-tool built from this checkout (required on macOS)")
+    parser.add_argument("--toolkit", type=Path, help="packaged macOS toolkit with relinker, libs and Vulkan (required on macOS)")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--runs", type=positive, default=2)
     parser.add_argument("--seconds", type=positive, help="run length for every title (default: the title's, else 60)")
@@ -545,58 +663,94 @@ def main(argv=None):
     args.out = args.out or args.build / "title-runs"
     previous = json.loads(args.compare.read_text(encoding="utf-8")) if args.compare else None
     platform = "windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux"
+    if platform == "macos" and (args.macos_tool is None or args.toolkit is None):
+        parser.error("macOS needs --macos-tool and --toolkit; the runner uses the launcher's installer")
+    if platform != "macos" and (args.macos_tool is not None or args.toolkit is not None):
+        parser.error("--macos-tool and --toolkit are only supported on macOS")
     titles = load_titles(args.titles)
     found = discover(args.games)
     ids = args.ids or sorted(found)
     missing = [title_id for title_id in ids if title_id not in found]
     if missing:
         raise SystemExit(f"not found under --games: {', '.join(missing)}")
-    locks = {title_id: lock_work(args.out.resolve() / "work" / f"{title_id}.lock") for title_id in ids}
-    busy = [title_id for title_id, handle in locks.items() if handle is None]
-    if busy:
-        raise SystemExit(f"already running in {args.out.resolve() / 'work'}: {', '.join(busy)}")
-    if previous and args.ids:
-        previous["titles"] = {title_id: title for title_id, title in previous["titles"].items() if title_id in ids}
-    source = source_root(args.build)
-    commit = git(source, "rev-parse", "--short", "HEAD")
-    output = args.out.resolve() / f"{commit}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
-    summary = {"build": {"commit": commit, "dirty": bool(git(source, "status", "--porcelain", "--untracked-files=no")), "note": args.note},
-               "machine": {"os": "", "gpu": "", "driver": "", "cpu": ""}, "runs": args.runs, "seconds": args.seconds or 60,
-               "driver_cache": "isolated" if platform == "linux" else "shared (not isolated)", "titles": {}}
-    for title_id in ids:
-        entry = titles.get(title_id, {})
-        seconds = args.seconds or entry.get("seconds", 60)
-        work = args.out.resolve() / "work" / title_id
-        try:
-            executable = prepare(title_id, found[title_id], entry, platform, args.build, work)
-        except (unwrap_self.Refused, OSError, RuntimeError, TypeError, ValueError) as error:
-            work.mkdir(parents=True, exist_ok=True)
-            (work / "relink.log").write_text(f"{type(error).__name__}: {error}\n", encoding="utf-8")
-            executable = None
-        (output / title_id).mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(work / "relink.log", output / title_id / "relink.log")
-        runs = []
-        for number in range(1, args.runs + 1):
-            if executable is None:
-                log = (work / "relink.log").read_text(encoding="utf-8", errors="replace")
-                result = {"outcome": "relink-failed", "exit_code": None, "seconds": 0, "presents": 0, "fps": 0.0,
-                          "first_error": first_error(log) or last_line(log),
-                          "warnings": {}, "frames": []}
-            else:
-                result = run_title(executable, work, output / title_id / f"run{number}", seconds, entry.get("env", {}), entry.get("pad"))
-                for key in ("os", "gpu", "driver", "cpu"):
-                    value = result.pop(key)
-                    summary["machine"][key] = summary["machine"][key] or value
-            runs.append({"run": number, "cache": "cold" if number == 1 else "warm", **result})
-            print(f"{title_id} run{number}: {result['outcome']}", flush=True)
-        summary["titles"][title_id] = {"name": found[title_id]["name"], "version": found[title_id]["version"], "seconds": seconds, "runs": runs}
+    if platform == "macos":
+        for title_id in ids:
+            for target in (args.out, args.out / "work" / title_id):
+                check_macos_paths(found[title_id]["package"], args.macos_tool, args.toolkit, target)
+    with ExitStack() as cleanup:
+        locks = {}
+        for title_id in ids:
+            handle = lock_work(args.out.resolve() / "work" / f"{title_id}.lock")
+            locks[title_id] = handle
+            if handle is not None:
+                cleanup.enter_context(handle)
+        busy = [title_id for title_id, handle in locks.items() if handle is None]
+        if busy:
+            raise SystemExit(f"already running in {args.out.resolve() / 'work'}: {', '.join(busy)}")
+        if previous and args.ids:
+            previous["titles"] = {title_id: title for title_id, title in previous["titles"].items() if title_id in ids}
+        source = ROOT if platform == "macos" else source_root(args.build)
+        commit = git(source, "rev-parse", "--short", "HEAD")
+        output = args.out.resolve() / f"{commit}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+        if platform == "macos":
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output = Path(tempfile.mkdtemp(prefix=output.name + "-", dir=output.parent))
+        summary = {"build": {"commit": commit, "dirty": bool(git(source, "status", "--porcelain", "--untracked-files=no")), "note": args.note},
+                   "machine": {"os": "", "gpu": "", "driver": "", "cpu": ""}, "runs": args.runs, "seconds": args.seconds or 60,
+                   "driver_cache": "isolated" if platform == "linux" else "shared (not isolated)", "titles": {}}
+        if platform == "macos":
+            summary["driver_cache"] = "uncontrolled (macOS/Metal)"
+            summary["build"]["component"] = "runner-source"
+            summary["macos"] = {"execution_mode": "rosetta-x86_64", "tool": str(args.macos_tool.resolve()),
+                                "tool_sha256": file_sha256(args.macos_tool), "toolkit": str(args.toolkit.resolve()),
+                                "shader_cache": "isolated", "audio_validated": False}
+        for title_id in ids:
+            entry = titles.get(title_id, {})
+            seconds = args.seconds or entry.get("seconds", 60)
+            work = args.out.resolve() / "work" / title_id
+            installation, runtime = None, None
+            try:
+                work.mkdir(parents=True, exist_ok=True)
+                (work / "relink.log").write_text("", encoding="utf-8")
+                if platform == "macos":
+                    installation = prepare_macos(title_id, found[title_id], entry, args.macos_tool, args.toolkit, work)
+                    executable = Path(installation["launcher"]) if installation else None
+                    runtime = Path(installation["workingDirectory"]) if installation else None
+                else:
+                    executable = prepare(title_id, found[title_id], entry, platform, args.build, work)
+            except (unwrap_self.Refused, OSError, RuntimeError, TypeError, ValueError) as error:
+                work.mkdir(parents=True, exist_ok=True)
+                with (work / "relink.log").open("a", encoding="utf-8") as log:
+                    log.write(f"{type(error).__name__}: {error}\n")
+                executable = None
+            (output / title_id).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(work / "relink.log", output / title_id / "relink.log")
+            if installation is not None:
+                shutil.copyfile(work / "install.json", output / title_id / "install.json")
+            runs = []
+            for number in range(1, args.runs + 1):
+                if executable is None:
+                    log = (work / "relink.log").read_text(encoding="utf-8", errors="replace")
+                    result = {"outcome": "relink-failed", "exit_code": None, "seconds": 0, "presents": 0, "fps": 0.0,
+                              "first_error": first_error(log) or last_line(log),
+                              "warnings": {}, "frames": []}
+                else:
+                    result = run_title(executable, work, output / title_id / f"run{number}", seconds, entry.get("env", {}), entry.get("pad"), runtime=runtime)
+                    for key in ("os", "gpu", "driver", "cpu"):
+                        value = result.pop(key)
+                        summary["machine"][key] = summary["machine"][key] or value
+                runs.append({"run": number, "cache": "cold" if number == 1 else "warm", **result})
+                print(f"{title_id} run{number}: {result['outcome']}", flush=True)
+            summary["titles"][title_id] = {"name": found[title_id]["name"], "version": found[title_id]["version"], "seconds": seconds, "runs": runs}
+            if installation is not None:
+                summary["titles"][title_id]["installation"] = installation
+            write_summary(output, summary)
         write_summary(output, summary)
-    write_summary(output, summary)
-    report = render_markdown(summary, previous)
-    (output / "summary.md").write_text(report, encoding="utf-8")
-    print(report)
-    print(f"written to {output}")
-    return 0
+        report = render_markdown(summary, previous)
+        (output / "summary.md").write_text(report, encoding="utf-8")
+        print(report)
+        print(f"written to {output}")
+        return 0
 
 
 if __name__ == "__main__":
