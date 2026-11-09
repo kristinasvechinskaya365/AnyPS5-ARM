@@ -57,6 +57,7 @@ jobs:
           directory = Path("diagnostics/reference-probe").resolve()
           source = Path("tools/translator/tests/cmpxchg_alias.c").resolve()
           compiler = Path(subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip())
+          sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
           revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           if revision != os.environ["GITHUB_SHA"] or platform.system() != "Darwin" or platform.machine() != "arm64":
               raise SystemExit("requires the event revision on native arm64 macOS")
@@ -64,14 +65,14 @@ jobs:
               "schema_version": 1, "revision": revision, "host": platform.platform(), "machine": platform.machine(),
               "source": {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
               "compiler": {"path": str(compiler), "version": subprocess.check_output([compiler, "--version"], text=True)},
-              "execution": "x86_64 under Rosetta", "cases": [],
+              "execution": "x86_64 under Rosetta", "sdk": sdk, "cases": [],
           }
           for optimization in ("O0", "O1"):
               binary = directory / f"reference-{optimization}"
               case = {"optimization": optimization, "passed": False, "commands": []}
               report["cases"].append(case)
               for stage, command in (
-                  ("build", [str(compiler), "-arch", "x86_64", f"-{optimization}", "-Wall", "-Wextra", "-Werror", "-DMAIN_WRAPPER", str(source), "-o", str(binary)]),
+                  ("build", [str(compiler), "-isysroot", sdk, "-arch", "x86_64", f"-{optimization}", "-Wall", "-Wextra", "-Werror", "-DMAIN_WRAPPER", str(source), "-o", str(binary)]),
                   ("run", ["/usr/bin/arch", "-x86_64", str(binary)]),
               ):
                   result = {"stage": stage, "command": command}
