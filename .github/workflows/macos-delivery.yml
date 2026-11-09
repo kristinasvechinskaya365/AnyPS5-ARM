@@ -10,6 +10,7 @@ on:
       - tools/release/embed_keys.sh
       - tools/required_test_report.py
       - tools/tests/test_macos_toolkit.py
+      - tools/tests/test_swift_package_resolve.py
   pull_request:
     paths:
       - .github/workflows/macos-delivery.yml
@@ -18,6 +19,7 @@ on:
       - tools/release/embed_keys.sh
       - tools/required_test_report.py
       - tools/tests/test_macos_toolkit.py
+      - tools/tests/test_swift_package_resolve.py
   workflow_dispatch:
 
 permissions:
@@ -45,6 +47,10 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
+      - name: Verify dependency acquisition recovery
+        run: |
+          mkdir -p diagnostics
+          python3 -m unittest tools.tests.test_swift_package_resolve -v 2>&1 | tee diagnostics/dependency-recovery-tests.log
       - name: Require baseline reproductions and every candidate toolkit test
         run: |
           mkdir -p diagnostics
@@ -147,6 +153,11 @@ jobs:
         run: |
           sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
           test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Acquire pinned Swift dependencies before testing
+        timeout-minutes: 18
+        run: |
+          python3 tools/macos/resolve_packages.py --package-path tools/macos/launcher --diagnostics diagnostics/package-resolution
+          git diff --exit-code -- tools/macos/launcher/Package.swift tools/macos/launcher/Package.resolved
       - name: Reproduce placement failures with the unchanged installer
         run: |
           python3 - <<'PY'
