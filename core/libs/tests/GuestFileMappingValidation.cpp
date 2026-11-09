@@ -214,6 +214,21 @@ void CheckControls() {
         Cleanup(munmap_nid_postfix(readable, Page));
         Require(correct, "valid read-only file mapping returned incorrect bytes");
     }
+    int ends[2] = {-1, -1};
+    Require(::pipe(ends) == 0, "create unsupported mapping descriptor");
+    bool preserved = true;
+    for (const int kind : {Shared, Private}) {
+        for (int protection = 0; protection < 8; ++protection) {
+            *__error_nid_postfix() = 0;
+            void* mapped = mmap_nid_postfix(nullptr, Page, protection, kind, ends[1], 0);
+            const int error = *__error_nid_postfix();
+            preserved = preserved && mapped == MAP_FAILED && error == ((protection & 1) != 0 ? 13 : 45);
+            if (mapped != MAP_FAILED) Cleanup(munmap_nid_postfix(mapped, Page));
+        }
+    }
+    Cleanup(::close(ends[0]));
+    Cleanup(::close(ends[1]));
+    Require(preserved, "unsupported descriptor error precedence changed");
 }
 
 }

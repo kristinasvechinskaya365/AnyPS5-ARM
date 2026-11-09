@@ -208,6 +208,11 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
     if ((protection & 1) != 0 && accessMode == O_WRONLY) return failed(GuestAccess);
     if (kind == GuestShared && (protection & 2) != 0 && accessMode == O_RDONLY) return failed(GuestAccess);
     if (!File::IsSharedMemoryDescriptor_nid_no_patch(mappingDescriptor) && !RegularFile(mappingDescriptor)) return failed(GuestNotSupported);
+#ifdef __linux__
+    if (accessMode == O_WRONLY) return failed(GuestAccess);
+#else
+    if (protection != 0 && accessMode == O_WRONLY) return failed(GuestAccess);
+#endif
 #elif defined(_WIN32)
     const int mappingDescriptor = descriptor;
     {
