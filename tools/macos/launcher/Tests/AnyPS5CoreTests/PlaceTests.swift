@@ -42,13 +42,14 @@ final class PlaceTests: XCTestCase {
     }
 
     func testLinksStayShortUnderPrivate() throws {
-        // A games folder given as /private/…: the bundle does not exist yet when its link is made.
-        let privateStore = URL(fileURLWithPath: "/private" + store.path)
-        guard FileManager.default.fileExists(atPath: privateStore.path) else { throw XCTSkip("no /private alias here") }
+        let resolved = store.resolvingSymlinksInPath().path
+        let privateStore = URL(fileURLWithPath: resolved.hasPrefix("/private/") ? resolved : "/private" + store.path)
+        XCTAssertTrue(fm.fileExists(atPath: privateStore.path))
         let bundle = privateStore.appendingPathComponent("Games/X-1.app")
         let data = privateStore.appendingPathComponent("Data/X-1")
         let staged = try partial("X-1")
-        try Installer.place(partial: URL(fileURLWithPath: "/private" + staged.path), bundle: bundle, data: data)
+        let privateStaged = privateStore.appendingPathComponent("Games/" + staged.lastPathComponent)
+        try Installer.place(partial: privateStaged, bundle: bundle, data: data)
         XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: bundle.appendingPathComponent("Contents/Resources/game").path), "../../../../Data/X-1/game")
         XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: data.appendingPathComponent("game/libs").path), "../../../Games/X-1.app/Contents/MacOS/libs")
     }
@@ -74,5 +75,118 @@ final class PlaceTests: XCTestCase {
         XCTAssertEqual(text(data.appendingPathComponent("game/_sd.bin")), "save", "saves stay")
         XCTAssertEqual(text(data.appendingPathComponent("game/app0/eboot.bin")), "eboot", "the game itself is the new one")
         XCTAssertEqual(text(data.appendingPathComponent("game/libs/libc.prx")), "lib")
+    }
+
+    func write(_ text: String, to url: URL) throws {
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+    }
+
+    func oldInstallation(external: Bool) throws -> (bundle: URL, data: URL, game: URL) {
+        let bundle = store.appendingPathComponent("Games/X-1.app")
+        let data = store.appendingPathComponent("Data/X-1")
+        let old = try partial("old")
+        try write("old executable", to: old.appendingPathComponent("Contents/MacOS/eboot"))
+        try write("old library", to: old.appendingPathComponent("Contents/MacOS/libs/libc.prx"))
+        if external {
+            try Installer.place(partial: old, bundle: bundle, data: data)
+        } else {
+            try fm.moveItem(at: old, to: bundle)
+        }
+        let game = bundle.appendingPathComponent("Contents/Resources/game").resolvingSymlinksInPath()
+        try write("old game", to: game.appendingPathComponent("app0/eboot.bin"))
+        try write("save", to: game.appendingPathComponent("_sd/user/slot/data.bin"))
+        try write("trophy", to: game.appendingPathComponent("_trophy/trophy.bin"))
+        try write("parked save", to: game.appendingPathComponent("_profiles/other/_sd/slot.bin"))
+        try write("profile", to: game.appendingPathComponent(".anyps5-profile"))
+        return (bundle, data, game)
+    }
+
+    func requireOriginal(_ bundle: URL, game: URL, file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(text(bundle.appendingPathComponent("Contents/MacOS/eboot")), "old executable", "failed placement must preserve the old executable", file: file, line: line)
+        XCTAssertEqual(text(bundle.appendingPathComponent("Contents/MacOS/libs/libc.prx")), "old library", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent("app0/eboot.bin")), "old game", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent("_sd/user/slot/data.bin")), "save", "failed placement must preserve save bytes after partial cleanup", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent("_trophy/trophy.bin")), "trophy", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent("_profiles/other/_sd/slot.bin")), "parked save", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent(".anyps5-profile")), "profile", file: file, line: line)
+        XCTAssertEqual(text(bundle.appendingPathComponent("Contents/MacOS/app0/eboot.bin")), "old game", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent("libs/libc.prx")), "old library", file: file, line: line)
+        XCTAssertEqual(text(game.appendingPathComponent("app0/libs/libc.prx")), "old library", file: file, line: line)
+    }
+
+    func immutable(_ url: URL, _ enabled: Bool) throws {
+        guard chflags(url.path, enabled ? UInt32(UF_IMMUTABLE) : 0) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    func testFailedDataDestinationPreservesLegacySavesAfterCleanup() throws {
+        let old = try oldInstallation(external: false)
+        try write("occupied destination", to: old.data)
+        let staged = try partial("X-1")
+        XCTAssertThrowsError(try Installer.place(partial: staged, bundle: old.bundle, data: old.data))
+        try fm.removeItem(at: staged)
+        try requireOriginal(old.bundle, game: old.game)
+        XCTAssertEqual(text(old.data), "occupied destination")
+    }
+
+    func finalMoveFailure(external: Bool) throws {
+        let old = try oldInstallation(external: external)
+        let save = old.game.appendingPathComponent("_sd/user/slot/data.bin")
+        let identity = try fm.attributesOfItem(atPath: save.path)[.systemFileNumber] as? NSNumber
+        let staged = try partial("X-1")
+        try immutable(staged, true)
+        defer { try? immutable(staged, false) }
+        XCTAssertThrowsError(try Installer.place(partial: staged, bundle: old.bundle, data: old.data))
+        XCTAssertEqual(try staged.appendingPathComponent("Contents/Resources/game").resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink, true)
+        try immutable(staged, false)
+        try fm.removeItem(at: staged)
+        try requireOriginal(old.bundle, game: old.game)
+        XCTAssertEqual((try? fm.attributesOfItem(atPath: save.path)[.systemFileNumber]) as? NSNumber, identity)
+        try Installer.place(partial: try partial("X-1"), bundle: old.bundle, data: old.data)
+        XCTAssertEqual(text(old.data.appendingPathComponent("game/_sd/user/slot/data.bin")), "save")
+        XCTAssertEqual(text(old.data.appendingPathComponent("game/app0/eboot.bin")), "eboot")
+        XCTAssertEqual(text(old.data.appendingPathComponent("game/libs/libc.prx")), "lib")
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: old.data.path), ["game"])
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: store.appendingPathComponent("Games").path), ["X-1.app"])
+    }
+
+    func testFailedFinalMoveRestoresLegacyBundleAndSaves() throws {
+        try finalMoveFailure(external: false)
+    }
+
+    func testFailedFinalMoveRestoresExternalBundleAndSaves() throws {
+        try finalMoveFailure(external: true)
+    }
+
+    func testSuccessfulReinstallPreservesNestedAndParkedSaves() throws {
+        let old = try oldInstallation(external: true)
+        try Installer.place(partial: try partial("X-1"), bundle: old.bundle, data: old.data)
+        let game = old.data.appendingPathComponent("game")
+        XCTAssertEqual(text(game.appendingPathComponent("_sd/user/slot/data.bin")), "save")
+        XCTAssertEqual(text(game.appendingPathComponent("_trophy/trophy.bin")), "trophy")
+        XCTAssertEqual(text(game.appendingPathComponent("_profiles/other/_sd/slot.bin")), "parked save")
+        XCTAssertEqual(text(game.appendingPathComponent(".anyps5-profile")), "profile")
+        XCTAssertEqual(text(game.appendingPathComponent("app0/eboot.bin")), "eboot")
+        XCTAssertEqual(text(game.appendingPathComponent("libs/libc.prx")), "lib")
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: old.data.path), ["game"])
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: store.appendingPathComponent("Games").path), ["X-1.app"])
+    }
+
+    func testFailedFirstInstallLeavesNoGameAndCanRetry() throws {
+        let bundle = store.appendingPathComponent("Games/X-1.app")
+        let data = store.appendingPathComponent("Data/X-1")
+        let staged = try partial("X-1")
+        try immutable(staged, true)
+        defer { try? immutable(staged, false) }
+        XCTAssertThrowsError(try Installer.place(partial: staged, bundle: bundle, data: data))
+        try immutable(staged, false)
+        try fm.removeItem(at: staged)
+        XCTAssertFalse(fm.fileExists(atPath: bundle.path))
+        XCTAssertFalse(fm.fileExists(atPath: data.appendingPathComponent("game").path))
+        try Installer.place(partial: try partial("X-1"), bundle: bundle, data: data)
+        XCTAssertEqual(text(bundle.appendingPathComponent("Contents/MacOS/app0/eboot.bin")), "eboot")
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: data.path), ["game"])
     }
 }
