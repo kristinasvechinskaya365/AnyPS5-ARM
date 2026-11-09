@@ -694,11 +694,14 @@ void Lifter::Impl::Exchange(const Instruction& instruction) {
     } else {
         old = Read(instruction, 0);
         equal = builder.CreateICmpEQ(old, expected);
-        Write(instruction, 0, builder.CreateSelect(equal, source, old));
+        if (bits == 32) {
+            const auto destination = RegisterOf(instruction.Op(0).reg).index;
+            SetGpr64(destination, builder.CreateSelect(equal, Resize(source, 64), Gpr64(destination)));
+        } else Write(instruction, 0, builder.CreateSelect(equal, source, old));
     }
     Sub(expected, old, builder.getFalse());
     if (bits == 32) SetGpr64(Rax, builder.CreateSelect(equal, Gpr64(Rax), Resize(old, 64)));
-    else WritePart(Rax, bits, builder.CreateSelect(equal, expected, old));
+    else WritePart(Rax, bits, builder.CreateSelect(equal, ReadPart(Rax, bits), old));
 }
 
 // stos and movs, with or without rep; the direction flag picks the step sign.
