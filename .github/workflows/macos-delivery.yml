@@ -192,24 +192,49 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import re
           import subprocess
 
           products = Path("diagnostics/products-path.txt").read_text().strip()
           products = Path(products)
-          report = {"revision": os.environ["GITHUB_SHA"], "products": str(products), "binaries": {}, "cli_runs": []}
+          report = {"revision": os.environ["GITHUB_SHA"], "products": str(products), "binaries": {}, "cli_runs": [], "passed": False}
+          report_path = Path("diagnostics/universal-report.json")
+          def save():
+              report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
           def inspect(path):
+              entry = {"path": str(path), "resolved_path": str(path.resolve())}
+              report["binaries"][str(path.relative_to(products))] = entry
+              save()
               subprocess.run(["lipo", str(path), "-verify_arch", "arm64", "x86_64"], check=True)
               with path.open("rb") as stream:
                   digest = hashlib.file_digest(stream, "sha256").hexdigest()
-              return {"sha256": digest, "architectures": subprocess.check_output(["lipo", "-archs", str(path)], text=True).split()}
+              architectures = subprocess.check_output(["lipo", "-archs", str(path)], text=True).split()
+              raw = subprocess.check_output(["dwarfdump", "--uuid", str(path)], text=True)
+              entry.update({"sha256": digest, "architectures": architectures, "dwarfdump": raw})
+              save()
+              uuids = {}
+              for line in raw.splitlines():
+                  match = re.fullmatch(r"UUID: ([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}) \(([^)]+)\) .+", line)
+                  if match is None or match[2] in uuids:
+                      raise SystemExit(f"invalid or duplicate Mach-O UUID record: {path}: {line}")
+                  uuids[match[2]] = match[1].lower()
+              if set(uuids) != set(architectures) or not uuids:
+                  raise SystemExit(f"each Mach-O architecture must have a build UUID: {path}")
+              entry["uuids"] = uuids
+              save()
+              return uuids
           for name in ("AnyPS5", "anyps5-tool"):
-              report["binaries"][name] = inspect(products / name)
+              inspect(products / name)
           for name in ("WebRTC", "LiveKitWebRTC", "RustLiveKitUniFFI"):
-              frameworks = set(path.resolve() for pattern in (name + ".framework", "*/" + name + ".framework") for path in products.glob(pattern))
-              if len(frameworks) != 1:
-                  raise SystemExit(f"expected exactly one {name}.framework, found {len(frameworks)}")
-              framework = frameworks.pop()
-              report["binaries"][name + ".framework"] = inspect(framework / name)
+              frameworks = sorted(set(path for pattern in (name + ".framework", "*/" + name + ".framework") for path in products.glob(pattern)))
+              if not frameworks:
+                  raise SystemExit(f"missing required runtime framework: {name}")
+              identity = None
+              for framework in frameworks:
+                  uuids = inspect(framework / name)
+                  if identity is not None and uuids != identity:
+                      raise SystemExit(f"runtime framework copies have different build identities: {name}")
+                  identity = uuids
           library = Path(os.environ["RUNNER_TEMP"]) / "empty-game-library"
           library.mkdir()
           for architecture in ("arm64", "x86_64"):
@@ -217,9 +242,11 @@ jobs:
               result = subprocess.run(command, capture_output=True, text=True, timeout=20)
               report["cli_runs"].append({"architecture": architecture, "command": command,
                                          "exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
-              Path("diagnostics/universal-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+              save()
               if result.returncode != 0 or result.stdout or result.stderr:
                   raise SystemExit(f"the {architecture} installer could not scan an empty library cleanly")
+          report["passed"] = True
+          save()
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("### Universal launcher build\n\nBoth arm64 and x86_64 are present in the launcher, installer and three required frameworks. The installer executed on both architectures. This does not validate a complete engine bundle or game execution.\n")
           PY
