@@ -1,0 +1,233 @@
+name: macOS delivery
+
+on:
+  push:
+    branches: [main, 'codex/macos-*']
+    paths:
+      - .github/workflows/macos-delivery.yml
+      - tools/macos/**
+      - tools/release/release-signing.pub
+      - tools/release/embed_keys.sh
+      - tools/required_test_report.py
+      - tools/tests/test_macos_toolkit.py
+  pull_request:
+    paths:
+      - .github/workflows/macos-delivery.yml
+      - tools/macos/**
+      - tools/release/release-signing.pub
+      - tools/release/embed_keys.sh
+      - tools/required_test_report.py
+      - tools/tests/test_macos_toolkit.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-delivery-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  toolkit-contracts:
+    name: Toolkit fingerprint and manifest regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASELINE_REVISION: 1843cb570735e6efa3c8843ef80a98af662a4dda
+    steps:
+      - name: Check out tested revision and baseline history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Require baseline reproductions and every candidate toolkit test
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY' 2>&1 | tee diagnostics/toolkit-tests.log
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import unittest
+          from tools.tests import test_macos_toolkit as tests
+
+          baseline = os.environ["BASELINE_REVISION"]
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["GITHUB_SHA"]:
+              raise SystemExit("the checkout does not match the triggering revision")
+          original = tests.LAYOUT
+          blob = subprocess.check_output(["git", "show", baseline + ":tools/macos/toolkit_layout.sh"])
+          previous = Path(os.environ["RUNNER_TEMP"]) / "toolkit-baseline/tools/macos/toolkit_layout.sh"
+          previous.parent.mkdir(parents=True)
+          previous.write_bytes(blob)
+          names = ["test_make_toolkit_uses_the_complete_fingerprint",
+                   "test_manifest_rejects_file_and_directory_links_before_replacing_output",
+                   "test_manifest_does_not_follow_an_existing_manifest_link"]
+          markers = ["self.assertNotEqual((output / \"version.txt\").read_text(), original)",
+                     "AssertionError: 0 == 0", "AssertionError: 0 == 0"]
+          reproductions = []
+          tests.LAYOUT = previous
+          try:
+              for name, marker in zip(names, markers):
+                  result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([tests.MacOSToolkitTests(name)]))
+                  matched = (result.testsRun == 1 and len(result.failures) == 1 and not result.errors and
+                             not result.skipped and not result.expectedFailures and not result.unexpectedSuccesses and
+                             result.failures[0][0]._testMethodName == name and marker in result.failures[0][1])
+                  reproductions.append({"test": name, "required_failure": marker, "reproduced": matched})
+          finally:
+              tests.LAYOUT = original
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(tests.MacOSToolkitTests)
+          registered = suite.countTestCases()
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          passed = (registered == 11 and result.testsRun == registered and result.wasSuccessful() and
+                    not result.skipped and not result.expectedFailures and not result.unexpectedSuccesses)
+          data = {"revision": revision, "baseline_revision": baseline, "host": platform.platform(),
+                  "python": platform.python_version(), "baseline_producer_sha256": hashlib.sha256(blob).hexdigest(),
+                  "candidate_producer_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+                  "test_source_sha256": hashlib.sha256(Path(tests.__file__).read_bytes()).hexdigest(),
+                  "baseline_reproductions": reproductions, "registered": registered, "executed": result.testsRun,
+                  "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped),
+                  "passed": passed and all(item["reproduced"] for item in reproductions)}
+          Path("diagnostics/toolkit-report.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"### Toolkit contracts\n\nBaseline regressions reproduced: {sum(item['reproduced'] for item in reproductions)}/3. Candidate tests: {result.testsRun}; failures: {len(result.failures)}; errors: {len(result.errors)}; skips: {len(result.skipped)}.\n")
+          if not data["passed"]:
+              raise SystemExit("the unchanged baseline must reproduce all three defects and all 11 candidate tests must pass")
+          PY
+      - name: Upload toolkit diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: toolkit-contracts-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
+          if-no-files-found: error
+
+  launcher-contracts:
+    name: Engine installation and update contracts
+    needs: toolkit-contracts
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests'
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Record source and machine identity
+        run: |
+          mkdir -p diagnostics
+          {
+            git rev-parse HEAD
+            sw_vers
+            uname -a
+            sysctl hw.model hw.memsize hw.ncpu machdep.cpu.brand_string
+            xcodebuild -version
+            swift --version
+            python3 --version
+            printf 'Coverage: launcher, engine installation, archives and updates using synthetic fixtures; no game or GPU validation\n'
+          } > diagnostics/identity.txt
+          printf '%s\n' 'Not selected: AnyPS5CoreTests.EngineCheckoutTests/testAnEngineFromARealCheckoutsBuild requires ANYPS5_LIVE_CHECKOUT and ANYPS5_LIVE_TOOLKIT pointing at a complete built engine. This job provisions synthetic toolkit contracts and Swift binaries.' \
+            > diagnostics/unprovisioned-live-test.txt
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+          tools/release/embed_keys.sh --check --swift-only
+      - name: Install Rosetta for the universal command-line checks
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Build the command-line installer and discover every Swift test
+        run: |
+          swift build --package-path tools/macos/launcher --product anyps5-tool --jobs 2 2>&1 | tee diagnostics/swift-build.log
+          lipo tools/macos/launcher/.build/debug/anyps5-tool -verify_arch arm64
+          swift test --package-path tools/macos/launcher --jobs 2 list > diagnostics/swift-inventory.txt 2> diagnostics/swift-discovery.log
+      - name: Execute required engine installation and update suites
+        run: |
+          filter="^AnyPS5CoreTests\.(${REQUIRED_SWIFT_SUITES// /|})/"
+          swift test --package-path tools/macos/launcher --skip-build --verbose --parallel --num-workers 2 \
+            --filter "$filter" --skip '^AnyPS5CoreTests\.EngineCheckoutTests/testAnEngineFromARealCheckoutsBuild$' \
+            --xunit-output "$PWD/diagnostics/swift.xml" 2>&1 | tee diagnostics/swift-tests.log
+      - name: Require every discovered case in every selected suite
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          command = [sys.executable, "tools/required_test_report.py", "--kind", "swift",
+                     "--inventory", "diagnostics/swift-inventory.txt", "--junit", "diagnostics/swift.xml",
+                     "--log", "diagnostics/swift-tests.log", "--output", "diagnostics/launcher-report.json"]
+          for suite in os.environ["REQUIRED_SWIFT_SUITES"].split():
+              method = r"/(?!testAnEngineFromARealCheckoutsBuild$)[^\s]+" if suite == "EngineCheckoutTests" else r"/[^\s]+"
+              command.extend(["--require", r"AnyPS5CoreTests\." + re.escape(suite) + method])
+          raise SystemExit(subprocess.run(command).returncode)
+          PY
+      - name: Build both release architectures of the launcher and installer
+        run: |
+          swift build --package-path tools/macos/launcher -c release --arch arm64 --arch x86_64 --product AnyPS5 --jobs 2 \
+            2>&1 | tee diagnostics/universal-launcher-build.log
+          swift build --package-path tools/macos/launcher -c release --arch arm64 --arch x86_64 --product anyps5-tool --jobs 2 \
+            2>&1 | tee diagnostics/universal-tool-build.log
+          products="$(swift build --package-path tools/macos/launcher -c release --arch arm64 --arch x86_64 --show-bin-path)"
+          printf '%s\n' "$products" > diagnostics/products-path.txt
+          for binary in AnyPS5 anyps5-tool; do
+            test -x "$products/$binary"
+            lipo "$products/$binary" -verify_arch arm64 x86_64
+            file "$products/$binary"
+            shasum -a 256 "$products/$binary"
+            otool -L "$products/$binary"
+          done > diagnostics/universal-binaries.txt
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          products = Path("diagnostics/products-path.txt").read_text().strip()
+          products = Path(products)
+          report = {"revision": os.environ["GITHUB_SHA"], "products": str(products), "binaries": {}, "cli_runs": []}
+          def inspect(path):
+              subprocess.run(["lipo", str(path), "-verify_arch", "arm64", "x86_64"], check=True)
+              with path.open("rb") as stream:
+                  digest = hashlib.file_digest(stream, "sha256").hexdigest()
+              return {"sha256": digest, "architectures": subprocess.check_output(["lipo", "-archs", str(path)], text=True).split()}
+          for name in ("AnyPS5", "anyps5-tool"):
+              report["binaries"][name] = inspect(products / name)
+          for name in ("WebRTC", "LiveKitWebRTC", "RustLiveKitUniFFI"):
+              frameworks = set(path.resolve() for pattern in (name + ".framework", "*/" + name + ".framework") for path in products.glob(pattern))
+              if len(frameworks) != 1:
+                  raise SystemExit(f"expected exactly one {name}.framework, found {len(frameworks)}")
+              framework = frameworks.pop()
+              report["binaries"][name + ".framework"] = inspect(framework / name)
+          library = Path(os.environ["RUNNER_TEMP"]) / "empty-game-library"
+          library.mkdir()
+          for architecture in ("arm64", "x86_64"):
+              command = ["arch", "-" + architecture, str(products / "anyps5-tool"), "scan", str(library)]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+              report["cli_runs"].append({"architecture": architecture, "command": command,
+                                         "exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+              Path("diagnostics/universal-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+              if result.returncode != 0 or result.stdout or result.stderr:
+                  raise SystemExit(f"the {architecture} installer could not scan an empty library cleanly")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Universal launcher build\n\nBoth arm64 and x86_64 are present in the launcher, installer and three required frameworks. The installer executed on both architectures. This does not validate a complete engine bundle or game execution.\n")
+          PY
+      - name: Upload delivery diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-delivery-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
+          if-no-files-found: error
