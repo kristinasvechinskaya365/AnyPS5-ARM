@@ -302,6 +302,21 @@ void ValidateRange(const void* addr, size_t len, size_t alignment) {
     }
 }
 
+size_t ValidatePlacement(const void* addr, size_t len, int flags, size_t alignment) {
+    ValidateLength(len);
+    alignment = ValidateAlignment(alignment);
+    constexpr int GuestMapNoOverwrite = 0x80;
+    constexpr int GuestMapNoCoalesce = 0x400000;
+    constexpr int SupportedFlags = GuestMapFixedFlag | GuestMapNoOverwrite | GuestMapNoCoalesce;
+    if ((flags & ~SupportedFlags) != 0) {
+        char message[64];
+        std::snprintf(message, sizeof(message), "Unsupported memory mapping flags 0x%x", flags);
+        throw std::invalid_argument(message);
+    }
+    if ((flags & GuestMapFixedFlag) != 0) ValidateRange(addr, len, alignment);
+    return alignment;
+}
+
 int LinuxProtFromSce(int prot) {
     if ((prot & ~0x3F7) != 0) {
         // return SCE_KERNEL_ERROR_EINVAL;
@@ -874,11 +889,12 @@ void RequireAliasesUnpinned(GuestAllocations::Mutation& mutation, std::uint64_t 
 #endif
 }
 
-bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, int64_t physStart = -1, [[maybe_unused]] bool zero = false) {
+bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, size_t alignment, int64_t physStart = -1, [[maybe_unused]] bool zero = false) {
     constexpr int GuestMapFixed = 0x10;
     constexpr int GuestMapNoOverwrite = 0x80;
-    if (addr == nullptr || (flags & GuestMapFixed) == 0 || (flags & GuestMapNoOverwrite) != 0 || !mutation.Covers(addr, len)) return false;
-    ValidateRange(addr, len, PS5_PAGE_SIZE);
+    if (addr == nullptr || (flags & GuestMapFixed) == 0 || (flags & GuestMapNoOverwrite) != 0) return false;
+    ValidatePlacement(addr, len, flags, alignment);
+    if (!mutation.Covers(addr, len)) return false;
     RequireResidentUnpinned(mutation, reinterpret_cast<std::uintptr_t>(addr), len);
     if (physStart >= 0) RequireAliasesUnpinned(mutation, static_cast<std::uint64_t>(physStart), len);
     Trace("remap fixed %p+0x%zx prot=0x%x phys=0x%llx", addr, len, prot, static_cast<long long>(physStart));
@@ -953,19 +969,10 @@ void Unmap(void* addr, size_t len) {
 }
 
 void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
-    ValidateLength(len);
-    alignment = ValidateAlignment(alignment);
+    alignment = ValidatePlacement(addr, len, flags, alignment);
     constexpr int GuestMapFixed = 0x10;
     constexpr int GuestMapNoOverwrite = 0x80;
-    constexpr int GuestMapNoCoalesce = 0x400000;
-    constexpr int SupportedFlags = GuestMapFixed | GuestMapNoOverwrite | GuestMapNoCoalesce;
-    if ((flags & ~SupportedFlags) != 0) {
-        char message[64];
-        std::snprintf(message, sizeof(message), "Unsupported memory mapping flags 0x%x", flags);
-        throw std::invalid_argument(message);
-    }
     if ((flags & GuestMapFixed) != 0) {
-        ValidateRange(addr, len, alignment);
 #ifdef _WIN32
         if ((flags & GuestMapNoOverwrite) != 0) {
             const auto start = reinterpret_cast<std::uintptr_t>(addr);
@@ -1174,9 +1181,10 @@ void UnmapRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t le
     RecordProtection(addr, len, -1);
 }
 
-void ReplaceFixedOverlap(GuestAllocations::Mutation& mutation, void* addr, size_t len, int flags) {
+void ReplaceFixedOverlap(GuestAllocations::Mutation& mutation, void* addr, size_t len, int flags, size_t alignment) {
     constexpr int GuestMapNoOverwrite = 0x80;
     if (addr == nullptr || (flags & GuestMapFixedFlag) == 0) return;
+    ValidatePlacement(addr, len, flags, alignment);
     if ((flags & GuestMapNoOverwrite) == 0 && mutation.Overlaps(addr, len)) UnmapRegistered(mutation, addr, len);
     mutation.RequireAvailable(addr, len);
 }
@@ -1206,12 +1214,12 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     GuestAllocations::Mutation mutation;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
-    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, physStart)) {
+    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, alignment, physStart)) {
         EraseReservations(*addr, len);
         RecordProtection(*addr, len, prot);
         return 0;
     }
-    ReplaceFixedOverlap(mutation, *addr, len, flags);
+    ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
     RequireAliasesUnpinned(mutation, static_cast<std::uint64_t>(physStart), len);
     std::lock_guard lock(g_directLock);
     ValidatePhysicalRange(static_cast<std::uint64_t>(physStart), len);
@@ -1237,12 +1245,12 @@ static int MapAnonymous(void** addr, size_t len, int prot, int flags, size_t ali
     if (exclusive && mutation.Overlaps(*addr, len)) return SCE_KERNEL_ERROR_ENOMEM;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
-    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, -1, zero)) {
+    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, alignment, -1, zero)) {
         EraseReservations(*addr, len);
         RecordProtection(*addr, len, prot);
         return 0;
     }
-    ReplaceFixedOverlap(mutation, *addr, len, flags);
+    ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
     void* mapped = MapAligned(*addr, len, zero ? PROT_NONE : LinuxProtFromSce(prot), flags, alignment);
     try {
 #ifdef _WIN32
@@ -1334,7 +1342,7 @@ int DoMapFileBacked_nid_no_patch(void** addr, size_t len, int prot, int flags, i
     const int placementFlags = flags & (GuestMapFixedFlag | 0x80 | 0x400000);
     flags = PlaceHintInReservation(*addr, len, placementFlags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
-    ReplaceFixedOverlap(mutation, *addr, len, flags);
+    ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
     void* mapped = MapPlaced(*addr, len, PROT_NONE, flags, alignment);
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(mapped, len);
     const int nativeProtection = LinuxProtFromSce(prot);
@@ -1402,7 +1410,7 @@ int DoMapFileBacked_nid_no_patch(void** addr, size_t len, int prot, int flags, i
             CloseHandle(section);
             return SCE_KERNEL_ERROR_ENOMEM;
         }
-        ReplaceFixedOverlap(mutation, *addr, len, flags);
+        ReplaceFixedOverlap(mutation, *addr, len, flags, alignment);
         mapped = MapPlaced(*addr, len, PROT_NONE, flags, alignment);
         GuestArena::GuestArenaMapFile_nid_postfix(mapped, len, section, offset, WinProtFromPosix(LinuxProtFromSce(prot)), viewProtection, static_cast<std::size_t>(std::min<std::uint64_t>(len, fileEnd - offset)));
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0, false);
@@ -1667,7 +1675,7 @@ int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
     const bool fixed = *addr != nullptr && (flags & GuestMapFixedFlag) != 0;
     if (fixed && mutation.Covers(*addr, len)) {
         constexpr int GuestMapNoOverwrite = 0x80;
-        if ((flags & GuestMapNoOverwrite) == 0 && RemapFixedIntoRegistered(mutation, *addr, len, 0, GuestMapFixedFlag)) {
+        if ((flags & GuestMapNoOverwrite) == 0 && RemapFixedIntoRegistered(mutation, *addr, len, 0, GuestMapFixedFlag, alignment)) {
             RecordProtection(*addr, len, -1);
             RecordReservation(*addr, len);
             return 0;
