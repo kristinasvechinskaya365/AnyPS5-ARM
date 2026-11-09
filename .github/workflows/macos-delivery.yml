@@ -2,7 +2,7 @@ name: macOS delivery
 
 on:
   push:
-    branches: [main, 'codex/macos-*', 'codex/main-integration']
+    branches: ['codex/macos-*']
     paths:
       - .github/workflows/macos-delivery.yml
       - tools/macos/**
@@ -23,6 +23,7 @@ on:
       - tools/tests/test_swift_package_resolve.py
       - tools/tests/test_swift_cache_provision.py
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -125,7 +126,7 @@ jobs:
     timeout-minutes: 75
     env:
       PLACEMENT_BASELINE_REVISION: 861424137e7b0b801fa1f86958b486292a268a89
-      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests PlaceTests ProfileSavesTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests ReleaseRepositoryTests InstallationCheckTests'
+      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests PlaceTests ProfileSavesTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests ReleaseRepositoryTests InstallationCheckTests IssueDraftTests'
     steps:
       - name: Check out tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -285,6 +286,131 @@ jobs:
               summary.write("### Unchanged installer baseline\n\nFour placement failures reproduced with their exact assertions; five controls passed. The candidate installer was restored before its build.\n")
           PY
           git diff --exit-code -- tools/macos/launcher/Sources/AnyPS5Core/Installer.swift
+      - name: Reproduce the oversized issue title with unchanged source
+        timeout-minutes: 32
+        env:
+          ISSUE_BASELINE_REVISION: 21f4b1130b8bfb181c5849b8e9d62ecffcb065c3
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import math
+          import os
+          from pathlib import Path
+          import re
+          import signal
+          import subprocess
+          import time
+          import xml.etree.ElementTree as ET
+          from tools.required_test_report import inventory, report, swift_outcomes
+
+          package = Path("tools/macos/launcher")
+          cache = os.environ["SWIFT_PACKAGE_CACHE"]
+          production = package / "Sources/AnyPS5Core/IssueDraft.swift"
+          fixture = package / "Tests/AnyPS5CoreTests/IssueDraftTests.swift"
+          baseline = os.environ["ISSUE_BASELINE_REVISION"]
+          revision = os.environ["GITHUB_SHA"]
+          name = "AnyPS5CoreTests.IssueDraftTests/testOversizedGameNamesFinishWithBoundedLinks"
+          marker = "issue draft child exceeded 10-second limit"
+          expected_source = "ea2f14234e39c03aee29af9369000e25511195db7572b2c3f1be30bed4a31b87"
+          if re.fullmatch(r"[0-9a-f]{40}", baseline) is None:
+              raise SystemExit("the issue baseline must name an immutable commit")
+          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != revision:
+              raise SystemExit("the issue comparison must use the triggering candidate revision")
+          subprocess.run(["git", "merge-base", "--is-ancestor", baseline, revision], check=True)
+          candidate = production.read_bytes()
+          fixture_source = fixture.read_bytes()
+          for path, content in ((production, candidate), (fixture, fixture_source)):
+              if subprocess.check_output(["git", "show", revision + ":" + str(path)]) != content:
+                  raise SystemExit("the issue comparison requires unchanged candidate source and fixture")
+          previous = subprocess.check_output(["git", "show", baseline + ":" + str(production)])
+          if hashlib.sha256(previous).hexdigest() != expected_source or previous == candidate:
+              raise SystemExit("the issue comparison requires the exact unrepaired implementation")
+          evidence = {"baseline_revision": baseline, "candidate_revision": revision,
+                      "baseline_source_sha256": hashlib.sha256(previous).hexdigest(),
+                      "candidate_source_sha256": hashlib.sha256(candidate).hexdigest(),
+                      "fixture_sha256": hashlib.sha256(fixture_source).hexdigest(),
+                      "commands": [], "expected_baseline_reproduced": False}
+          evidence_path = Path("diagnostics/issue-title-baseline.json")
+          def save():
+              evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+          def run(command, output, timeout):
+              started = time.monotonic()
+              with open(output, "w", encoding="utf-8") as stream:
+                  process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                  timed_out = False
+                  try:
+                      process.wait(timeout=timeout)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      os.killpg(process.pid, signal.SIGKILL)
+                      process.wait(timeout=10)
+              evidence["commands"].append({"command": command, "log": output, "exit_code": process.returncode,
+                                           "timed_out": timed_out, "seconds": time.monotonic() - started})
+              save()
+              if timed_out:
+                  raise SystemExit("the issue baseline must finish with an ordinary XCTest assertion")
+              return process.returncode
+          save()
+          try:
+              production.write_bytes(previous)
+              changed = subprocess.check_output(["git", "diff", "--name-only", "HEAD", "--", str(package)], text=True).splitlines()
+              if production.read_bytes() != previous or changed != [str(production)]:
+                  raise SystemExit("only the unchanged issue implementation may be substituted")
+              if run(["swift", "test", "--package-path", str(package), "--cache-path", cache, "--jobs", "2", "list"],
+                     "diagnostics/issue-title-baseline-inventory.txt", 1800) != 0:
+                  raise SystemExit("the unchanged issue implementation must build with the candidate fixture")
+              code = run(["swift", "test", "--package-path", str(package), "--cache-path", cache, "--skip-build", "--verbose",
+                          "--parallel", "--num-workers", "1", "--filter", "^" + re.escape(name) + "$",
+                          "--xunit-output", str(Path("diagnostics/issue-title-baseline.xml").resolve())],
+                         "diagnostics/issue-title-baseline.log", 60)
+              if code != 1:
+                  raise SystemExit("the unchanged issue implementation must return its ordinary XCTest failure exit code")
+          finally:
+              try:
+                  evidence["baseline_source_unchanged"] = production.read_bytes() == previous
+              finally:
+                  production.write_bytes(candidate)
+                  evidence["candidate_restored"] = production.read_bytes() == candidate
+                  evidence["fixture_unchanged"] = fixture.read_bytes() == fixture_source
+                  save()
+          if not all(evidence[key] for key in ("baseline_source_unchanged", "candidate_restored", "fixture_unchanged")):
+              raise SystemExit("the issue source and fixture identities must survive the comparison")
+          inventory_path = Path("diagnostics/issue-title-baseline-inventory.txt")
+          log_path = Path("diagnostics/issue-title-baseline.log")
+          junit_path = Path("diagnostics/issue-title-baseline.xml")
+          names = inventory(inventory_path, "swift")
+          data = report(inventory_path, junit_path, "swift", [re.escape(name)], log_path=log_path)
+          outcomes = swift_outcomes(log_path, names)
+          text = log_path.read_text(encoding="utf-8")
+          blocks = list(re.finditer(r"Test Case '([^']+)' started\.(.*?)Test Case '\1' (passed|failed|skipped) \(", text, re.S))
+          method = name.split("/", 1)[1]
+          identities = {name.replace("/", "."), "-[" + name.replace("/", " ") + "]",
+                        "IssueDraftTests." + method, "-[IssueDraftTests " + method + "]"}
+          errors = [line for line in text.splitlines() if re.search(r"(^|\s)error:", line)]
+          exact_failure = (len(blocks) == 1 and blocks[0][1] in identities and blocks[0][3] == "failed"
+                           and len(errors) == 1 and marker in errors[0] and errors[0] in blocks[0][2]
+                           and text.count(marker) == 1 and outcomes == {name: "failed"})
+          xml = ET.parse(junit_path).getroot()
+          cases = list(xml.iter("testcase"))
+          assertions_only = (len(cases) == 1 and len(cases[0].findall("failure")) == 1
+                             and not any(node.tag in ("error", "skipped") for node in xml.iter())
+                             and all(node.get("status") in (None, "run") for node in cases)
+                             and all(node.get(key) in (None, "0") for node in xml.iter()
+                                     if node.tag in ("testsuite", "testsuites") for key in ("errors", "skipped", "disabled")))
+          seconds = float(cases[0].get("time", "nan")) if len(cases) == 1 else float("nan")
+          reproduced = (name in names and data["required"] == 1 and data["failed"] == 1 and data["passed"] == 0
+                        and data["errors"] == ["required test " + name + ": failed"]
+                        and exact_failure and assertions_only and math.isfinite(seconds) and 0 < seconds <= 30)
+          evidence.update({"report": data, "exact_failure": exact_failure, "assertions_only": assertions_only,
+                           "test_seconds": seconds if math.isfinite(seconds) else None, "expected_baseline_reproduced": reproduced})
+          save()
+          if not reproduced:
+              raise SystemExit("only the exact bounded issue-title assertion may reproduce the baseline")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Unchanged issue title baseline\n\nThe oversized-title test reached its bounded child timeout and failed with its exact assertion. The candidate source and identical fixture were verified before the regular build.\n")
+          PY
+          git diff --exit-code -- tools/macos/launcher/Sources/AnyPS5Core/IssueDraft.swift tools/macos/launcher/Tests/AnyPS5CoreTests/IssueDraftTests.swift
       - name: Build the command-line installer and discover every Swift test
         run: |
           swift build --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --product anyps5-tool --jobs 2 2>&1 | tee diagnostics/swift-build.log

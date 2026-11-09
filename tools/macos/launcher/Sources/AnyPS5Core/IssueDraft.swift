@@ -109,23 +109,35 @@ public struct IssueDraft: Sendable {
     static func fit(repository: String, template: String, title: String, fixed: [Field], log: (id: String, label: String), after: [Field],
                     report: SessionReport, logLines: Int) -> IssueDraft {
         let clean = { (field: Field) in Field(id: field.id, label: field.label, value: report.privacy.clean(field.value)) }
-        let title = report.privacy.clean(title)
+        var title = report.privacy.clean(title)
         var fields = fixed.map(clean)
         var tail = report.logTail(logLines).map { $0.count > lineLimit ? String($0.prefix(lineLimit)) + "…" : $0 }
-        var trailing = after.map(clean)
+        let logIndex = fields.count
+        fields += [Field(id: log.id, label: log.label, value: tail.joined(separator: "\n"))] + after.map(clean)
+        func length(_ text: String) -> Int {
+            link(repository: repository, template: template, title: text, fields: []).absoluteString.count
+        }
         while true {
-            let all = fields + [Field(id: log.id, label: log.label, value: tail.joined(separator: "\n"))] + trailing
-            let url = link(repository: repository, template: template, title: title, fields: all)
-            if url.absoluteString.count <= maximumLength { return IssueDraft(title: title, fields: all, url: url) }
-            if !tail.isEmpty {
+            let url = link(repository: repository, template: template, title: title, fields: fields)
+            if url.absoluteString.count <= maximumLength { return IssueDraft(title: title, fields: fields, url: url) }
+            if tail.count > 1 {
                 tail.removeFirst()
-            } else if let longest = (fields + trailing).indices.max(by: { (fields + trailing)[$0].value.count < (fields + trailing)[$1].value.count }) {
-                // Only a form of very long settings gets here: its longest field is shortened.
-                var every = fields + trailing
-                let field = every[longest]
-                every[longest] = Field(id: field.id, label: field.label, value: String(field.value.prefix(field.value.count * 3 / 4)) + "…")
-                fields = Array(every.prefix(fields.count))
-                trailing = Array(every.suffix(trailing.count))
+                fields[logIndex] = Field(id: log.id, label: log.label, value: tail.joined(separator: "\n"))
+                continue
+            }
+            let values = [title] + fields.map(\.value)
+            let sizes = values.map(length)
+            let longest = sizes.indices.max { sizes[$0] < sizes[$1] }!
+            let text = values[longest]
+            let count = text.count * 3 / 4
+            let shortened = longest == logIndex + 1 ? String(text.suffix(count)) : String(text.prefix(count))
+            let marked = longest == logIndex + 1 ? "…" + shortened : shortened + "…"
+            let value = length(marked) < sizes[longest] ? marked : shortened
+            if longest == 0 {
+                title = value
+            } else {
+                let field = fields[longest - 1]
+                fields[longest - 1] = Field(id: field.id, label: field.label, value: value)
             }
         }
     }

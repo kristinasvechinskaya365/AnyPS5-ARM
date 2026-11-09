@@ -16,7 +16,7 @@ This fork keeps its macOS fixes and optional native translator together on `main
 
 ### Install this fork
 
-1. Open [macOS installable app builds](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml), select a successful run on `main`, and download its app artifact while signed in to GitHub. If the artifact has expired, select **Run workflow** on `main` to rebuild it.
+1. Open [macOS validation builds](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-validation.yml), select a successful run on `main`, and download its `AnyPS5-macOS-<commit>` artifact while signed in to GitHub.
 2. Extract the artifact. Keep `install.sh`, `AnyPS5-macOS.zip` and `SHA256SUMS` in the same folder.
 3. Open Terminal in that folder and run:
 
@@ -28,7 +28,7 @@ The installer verifies the archive, architecture, code signature and required ma
 
 These CI packages are signed ad hoc, without Apple notarization. The installer preserves download quarantine. If macOS blocks a package you have verified and trust, follow [Apple's instructions](https://support.apple.com/en-us/102445) for **System Settings → Privacy & Security → Open Anyway**. The default game engine needs Rosetta on Apple silicon; if it is missing, the installer explains how to install it with `softwareupdate --install-rosetta` and Apple's prompts.
 
-App artifacts are retained for 90 days. The fork's release updater never falls back to an upstream app, and automatic updates still require a trusted release signature. [Installation details](docs/dev/MACOS_PORT.md#installing-a-packaged-app) · [How to use the launcher](docs/user/GUIDE.md#the-anyps5-app)
+App artifacts are retained for 90 days. If an artifact has expired, open [macOS installable app](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) and select **Run workflow** on `main` to rebuild the complete package. The fork's release updater never falls back to an upstream app, and automatic updates still require a trusted release signature. [Installation details](docs/dev/MACOS_PORT.md#installing-a-packaged-app) · [How to use the launcher](docs/user/GUIDE.md#the-anyps5-app)
 
 **On Windows or Linux?** Use [**AnyPS5 Desktop**](https://github.com/AnyTogether/AnyPS5-Desktop/releases/latest): this launcher for those systems, with AnyTogether built in (early preview).
 

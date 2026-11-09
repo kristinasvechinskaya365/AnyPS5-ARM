@@ -59,13 +59,13 @@ Current build and regression results are recorded for each exact commit in this 
 
 **AnyPS5.app** is a launcher laid out like the PS5 home screen. It finds game dumps in a folder, converts supported dumps for the Mac and starts them. The packaged app includes the engine and Vulkan runtime; installing it needs no compiler, Python or Vulkan SDK.
 
-**Install.** Sign in to GitHub and open this fork's [macOS installable app builds](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml). Select a successful run on `main`, download its app artifact and extract it. In Terminal, open the extracted folder containing `install.sh`, `AnyPS5-macOS.zip` and `SHA256SUMS`, then run:
+**Install.** Sign in to GitHub and open this fork's [macOS validation builds](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-validation.yml). Select a successful run on `main`, download its `AnyPS5-macOS-<commit>` artifact and extract it. In Terminal, open the extracted folder containing `install.sh`, `AnyPS5-macOS.zip` and `SHA256SUMS`, then run:
 
 ```sh
 sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS --open
 ```
 
-The app is installed in `~/Applications`. The installer verifies its checksum, code signature, architecture and actual minimum macOS version before replacing an existing app. Each build requires at least macOS 14, and its bundled binaries may require a newer version. Artifacts remain available for 90 days; **Run workflow** on `main` rebuilds an expired artifact.
+The app is installed in `~/Applications`. The installer verifies its checksum, code signature, architecture and actual minimum macOS version before replacing an existing app. Each build requires at least macOS 14, and its bundled binaries may require a newer version. Artifacts remain available for 90 days; **Run workflow** on `main` in [macOS installable app](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) rebuilds an expired package.
 
 CI packages use ad hoc signatures and are not notarized. The installer preserves browser quarantine. If macOS blocks a package you have verified and trust, follow [Apple's instructions](https://support.apple.com/en-us/102445) for **System Settings → Privacy & Security → Open Anyway**. The default game engine needs Rosetta on Apple silicon. If it is missing, run `softwareupdate --install-rosetta` and follow Apple's prompts.
 
@@ -175,7 +175,7 @@ AnyPS5-ARM is the macOS port of [AnyPS5](https://github.com/boykopovar/AnyPS5). 
 #### 1. Build
 
 ```sh
-git clone --recursive https://github.com/AnyTogether/AnyPS5-ARM.git
+git clone --recursive https://github.com/kristinasvechinskaya365/AnyPS5-ARM.git
 cd AnyPS5-ARM
 cmake -S . -B build-mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
 ninja -C build-mac all libs
@@ -330,13 +330,13 @@ Güncel derleme ve regresyon sonuçları, her commit için bu fork'un [Actions k
 
 **AnyPS5.app**, PS5 ana ekranı gibi tasarlanmış bir launcher. Bir klasördeki oyun dump'larını bulur, desteklenen dump'ları Mac için dönüştürür ve başlatır. Paket, oyun motorunu ve Vulkan çalışma zamanı dosyalarını içerir; kurulum için derleyici, Python veya Vulkan SDK gerekmez.
 
-**Kurulum.** GitHub'a giriş yapıp bu fork'un [macOS installable app derlemelerini](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) aç. `main` üzerindeki başarılı bir çalıştırmanın uygulama artifact'ini indir ve çıkart. Terminal'de `install.sh`, `AnyPS5-macOS.zip` ve `SHA256SUMS` dosyalarının bulunduğu klasörü açıp çalıştır:
+**Kurulum.** GitHub'a giriş yapıp bu fork'un [macOS validation derlemelerini](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-validation.yml) aç. `main` üzerindeki başarılı bir çalıştırmanın `AnyPS5-macOS-<commit>` artifact'ini indir ve çıkart. Terminal'de `install.sh`, `AnyPS5-macOS.zip` ve `SHA256SUMS` dosyalarının bulunduğu klasörü açıp çalıştır:
 
 ```sh
 sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS --open
 ```
 
-Uygulama `~/Applications` içine kurulur. Yükleyici, mevcut uygulamayı değiştirmeden önce sağlama toplamını, kod imzasını, mimariyi ve gerçek minimum macOS sürümünü doğrular. Her derleme en az macOS 14 gerektirir; paketteki dosyalar daha yeni bir sürüm gerektirebilir. Artifact'ler 90 gün saklanır; süresi dolduğunda `main` üzerinde **Run workflow** ile yeniden derlenebilir.
+Uygulama `~/Applications` içine kurulur. Yükleyici, mevcut uygulamayı değiştirmeden önce sağlama toplamını, kod imzasını, mimariyi ve gerçek minimum macOS sürümünü doğrular. Her derleme en az macOS 14 gerektirir; paketteki dosyalar daha yeni bir sürüm gerektirebilir. Artifact'ler 90 gün saklanır; süresi dolduğunda [macOS installable app](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) içinde `main` üzerinde **Run workflow** ile yeniden derlenebilir.
 
 CI paketleri ad hoc imzalıdır ve Apple tarafından notarize edilmemiştir. Yükleyici, tarayıcının karantina bilgisini korur. macOS, doğruladığın ve güvendiğin paketi engellerse [Apple'ın yönergelerindeki](https://support.apple.com/en-us/102445) **Sistem Ayarları → Gizlilik ve Güvenlik → Yine de Aç** adımını kullan. Varsayılan oyun motoru Apple silicon üzerinde Rosetta gerektirir. Eksikse `softwareupdate --install-rosetta` komutunu çalıştırıp Apple'ın yönergelerini izle.
 
@@ -431,7 +431,7 @@ AnyPS5-ARM, [AnyPS5](https://github.com/boykopovar/AnyPS5)'in macOS sürümüdü
 #### 1. Derleme
 
 ```sh
-git clone --recursive https://github.com/AnyTogether/AnyPS5-ARM.git
+git clone --recursive https://github.com/kristinasvechinskaya365/AnyPS5-ARM.git
 cd AnyPS5-ARM
 cmake -S . -B build-mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
 ninja -C build-mac all libs

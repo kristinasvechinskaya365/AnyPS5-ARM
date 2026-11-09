@@ -4,7 +4,7 @@ This fork combines the community macOS port from [mugurc/AnyPS5 `macos-port`](ht
 
 Guest code stays x86-64 and runs under Rosetta 2. The relinker writes Mach-O (`--macos`), the prx libraries build as x86-64 dylibs, and Vulkan runs through MoltenVK. [Apple describes general-purpose Rosetta support through macOS 27](https://developer.apple.com/news/?id=w5ngl9k2). The later exception for older unmaintained games does not establish support for this engine.
 
-For installation, use the [packaged app](#installing-a-packaged-app). The build instructions below are for development. The workflow builds the complete engine and universal launcher, packages their runtime dependencies, hides the source build directories and SDK, and verifies both launcher architectures and the installed copy. An ARM64 engine compile and the native translator fixtures are separate checks; neither is a game or GPU compatibility result.
+For installation, use the [packaged app](#installing-a-packaged-app). The build instructions below are for development. The workflow builds the complete engine and universal launcher, packages their runtime dependencies, hides the source build directories and SDK, and verifies both launcher architectures and the installed copy. The [macOS validation workflow](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-validation.yml) runs the Mac gates in sequence to reduce simultaneous hosted-runner requests and requires every gate to succeed. An ARM64 engine compile and the native translator fixtures are separate checks; neither is a game or GPU compatibility result.
 
 ## Build
 
@@ -100,7 +100,7 @@ sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS
 ```
 
 The installer uses macOS's built-in tools and defaults to `~/Applications/AnyPS5.app`.
-The [macOS installable app workflow](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) retains the complete app artifact for 90 days; a manual run on `main` rebuilds expired artifacts. The package records the highest minimum macOS version required by any bundled Mach-O slice, with a floor of 14.0. The installer requires macOS 14 or newer, checks that declared minimum system version,
+Successful `main` runs of [macOS validation](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-validation.yml) carry the complete app artifact for 90 days. A manual run of [macOS installable app](https://github.com/kristinasvechinskaya365/AnyPS5-ARM/actions/workflows/macos-app.yml) on `main` rebuilds an expired package. The package records the highest minimum macOS version required by any bundled Mach-O slice, with a floor of 14.0. The installer requires macOS 14 or newer, checks that declared minimum system version,
 compatible executable and code-signature integrity, and preserves an existing app
 until its replacement is ready. Failed placement restores the previous app; if the
 destination prevents restoration, the error names the preserved recovery copy.

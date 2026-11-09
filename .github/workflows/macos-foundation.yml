@@ -25,7 +25,7 @@ on:
       - tools/tests/test_ffmpeg_fetch.py
       - tools/macos/launcher/**
   push:
-    branches: [main, 'codex/**']
+    branches: ['codex/**', '!codex/main-integration']
     paths:
       - .github/workflows/macos-foundation.yml
       - .github/anytogether-ci/ctest-known-failures.txt
@@ -49,6 +49,7 @@ on:
       - tools/tests/test_ffmpeg_fetch.py
       - tools/macos/launcher/**
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -226,6 +227,8 @@ jobs:
 
   macos-installer:
     name: Required Swift installer contract tests
+    needs: macos-runtime
+    if: ${{ !cancelled() }}
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -272,6 +275,8 @@ jobs:
 
   macos-write-watch:
     name: macOS write-watch regression comparison
+    needs: macos-installer
+    if: ${{ !cancelled() }}
     runs-on: macos-26
     timeout-minutes: 20
     env:

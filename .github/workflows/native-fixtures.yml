@@ -2,7 +2,7 @@ name: Native arm64 fixtures
 
 on:
   push:
-    branches: [main, 'codex/main-integration', 'codex/native-*']
+    branches: ['codex/native-*']
     paths:
       - .github/workflows/native-fixtures.yml
       - CMakeLists.txt
@@ -18,6 +18,7 @@ on:
       - tools/macos/fetch_ffmpeg.py
       - docs/dev/NATIVE_ARM64.md
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

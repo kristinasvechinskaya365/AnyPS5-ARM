@@ -2,7 +2,7 @@ name: macOS installable app
 
 on:
   push:
-    branches: [main, 'codex/main-integration', 'codex/macos-package-*']
+    branches: ['codex/macos-package-*']
     paths:
       - .github/workflows/macos-app.yml
       - CMakeLists.txt
@@ -16,6 +16,7 @@ on:
       - tools/tests/test_macos_install*
       - tools/tests/test_bundle_minimum.py
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

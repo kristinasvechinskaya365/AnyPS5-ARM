@@ -2,7 +2,7 @@ name: macOS write watch
 
 on:
   push:
-    branches: [main, 'codex/macos-*', 'codex/main-integration']
+    branches: ['codex/macos-*']
     paths:
       - .github/workflows/macos-write-watch.yml
       - core/libs/prx/libc/src/GuestWriteWatch.cpp
@@ -12,6 +12,7 @@ on:
       - tools/required_test_report.py
       - tools/tests/test_required_test_report.py
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -31,6 +32,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         architecture: [arm64, x86_64]
     env:

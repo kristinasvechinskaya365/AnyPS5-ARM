@@ -2,7 +2,7 @@ name: macOS memory regressions
 
 on:
   push:
-    branches: [main, 'codex/macos-*', 'codex/main-integration']
+    branches: ['codex/macos-*']
     paths:
       - .github/workflows/macos-memory-regressions.yml
       - .github/anytogether-ci/ctest-known-failures.txt
@@ -23,6 +23,7 @@ on:
       - tools/macos/fetch_ffmpeg.py
       - tools/tests/test_ffmpeg_fetch.py
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

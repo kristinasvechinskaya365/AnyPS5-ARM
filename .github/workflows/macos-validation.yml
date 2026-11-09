@@ -1,0 +1,107 @@
+name: macOS validation
+
+on:
+  push:
+    branches: [main, 'codex/main-integration']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: Installable application
+    uses: ./.github/workflows/macos-app.yml
+  delivery:
+    name: Launcher and update contracts
+    needs: app
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/macos-delivery.yml
+  native-engine:
+    name: Complete native engine compile
+    needs: delivery
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/macos-native-engine.yml
+  native-fixtures:
+    name: Native translator fixtures
+    needs: native-engine
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/native-fixtures.yml
+  foundation:
+    name: Core foundation
+    needs: native-fixtures
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/macos-foundation.yml
+  memory:
+    name: Memory regressions
+    needs: foundation
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/macos-memory-regressions.yml
+  write-watch:
+    name: Write watch on both architectures
+    needs: memory
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/macos-write-watch.yml
+  build:
+    name: Cross-platform builds and host contracts
+    needs: write-watch
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/build.yml
+    with:
+      validate-source: true
+  validation-ok:
+    name: macos-validation-ok
+    needs: [app, delivery, native-engine, native-fixtures, foundation, memory, write-watch, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every independent macOS gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          required = ['app', 'delivery', 'native-engine', 'native-fixtures', 'foundation', 'memory', 'write-watch', 'build']
+          results = json.loads(os.environ['RESULTS'])
+          errors = []
+          if set(results) != set(required):
+              errors.append('the macOS gate inventory is incomplete or unexpected')
+          outcomes = {name: results.get(name, {}).get('result', 'missing') for name in required}
+          for name, outcome in outcomes.items():
+              if outcome != 'success':
+                  errors.append(f'{name}: {outcome}')
+          report = {'revision': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'],
+                    'gates': outcomes, 'errors': errors, 'passed': not errors}
+          Path('diagnostics').mkdir(exist_ok=True)
+          Path('diagnostics/macos-validation.json').write_text(json.dumps(report, indent=2) + '\n')
+          summary = ['### macOS validation', '', f"Revision: `{report['revision']}`", '', '| Gate | Result |', '| --- | --- |']
+          summary.extend(f'| {name} | {outcome} |' for name, outcome in outcomes.items())
+          text = '\n'.join(summary) + '\n'
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write(text)
+          if errors:
+              raise SystemExit('; '.join(errors))
+          PY
+      - name: Upload the aggregate gate results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-validation-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 30
+          if-no-files-found: error

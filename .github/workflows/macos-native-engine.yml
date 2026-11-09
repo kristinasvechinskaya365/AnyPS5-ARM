@@ -1,17 +1,8 @@
 name: macOS native arm64 engine compile
 
 on:
-  push:
-    branches: [main, 'codex/main-integration']
-    paths:
-      - .github/workflows/macos-native-engine.yml
-      - CMakeLists.txt
-      - cmake/**
-      - .gitmodules
-      - 3rdparty/**
-      - core/**
-      - tools/macos/fetch_ffmpeg.py
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

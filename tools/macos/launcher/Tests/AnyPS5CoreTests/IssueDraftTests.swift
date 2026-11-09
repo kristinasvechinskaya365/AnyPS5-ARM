@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import AnyPS5Core
 
@@ -105,6 +106,76 @@ final class IssueDraftTests: XCTestCase {
     func testAPlusInTheLogIsNotASpace() {
         let draft = IssueDraft.crash(report(session: "a+b=c & d#e\n"))
         XCTAssertTrue(draft.url.absoluteString.contains("a%2Bb%3Dc%20%26%20d%23e"))
+    }
+
+    func testOversizedGameNamesFinishWithBoundedLinks() throws {
+        let inputName = "issue-draft-overflow-input.json"
+        let resultName = "issue-draft-overflow-result.json"
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let input = directory.appendingPathComponent(inputName)
+        if FileManager.default.fileExists(atPath: input.path) {
+            let names = try JSONDecoder().decode([String].self, from: Data(contentsOf: input))
+            let newest = "newest preserved line /Users/ada/Library s3cr3t-refresh-token-value"
+            let expected = privacy.clean(newest)
+            let session = (1...80).map { "old line \($0) " + String(repeating: "x", count: 80) }.joined(separator: "\n") + "\n" + newest
+            var completed = 0
+            for name in names {
+                var sample = report(session: session)
+                sample.gameName = name
+                let drafts = [(IssueDraft.crash(sample), "crash.yml", "/\(IssueDraft.repository)/issues/new"),
+                              (IssueDraft.engine(sample), "bug_report.yml", "/boykopovar/AnyPS5/issues/new")]
+                for (draft, template, path) in drafts {
+                    XCTAssertLessThanOrEqual(draft.url.absoluteString.count, IssueDraft.maximumLength)
+                    let components = try XCTUnwrap(URLComponents(url: draft.url, resolvingAgainstBaseURL: false))
+                    let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                    XCTAssertEqual(components.host, "github.com")
+                    XCTAssertEqual(components.path, path)
+                    XCTAssertEqual(query["template"], template)
+                    XCTAssertEqual(query["title"], draft.title)
+                    XCTAssertTrue(draft.preview.hasPrefix(draft.title + "\n"))
+                    for field in draft.fields { XCTAssertEqual(query[field.id], field.value) }
+                    XCTAssertTrue(query["log"]?.hasSuffix(expected) == true)
+                    XCTAssertTrue(draft.preview.contains(expected))
+                    for secret in ["/Users/ada", "s3cr3t-refresh-token-value"] {
+                        XCTAssertFalse(draft.preview.contains(secret))
+                        XCTAssertFalse(query.values.contains { $0.contains(secret) })
+                    }
+                    completed += 1
+                }
+            }
+            try JSONEncoder().encode(["completed": completed]).write(to: directory.appendingPathComponent(resultName))
+            return
+        }
+        let names = [String(repeating: "x", count: 8000),
+                     String(repeating: "🚀e\u{301}漢", count: 1500),
+                     "A" + String(repeating: "\u{301}", count: 8000)]
+            .map { "/Users/ada/Library s3cr3t-refresh-token-value " + $0 }
+        try JSONEncoder().encode(names).write(to: folder.appendingPathComponent(inputName))
+        let log = folder.appendingPathComponent("issue-draft-overflow.log")
+        try Data().write(to: log)
+        let output = try FileHandle(forWritingTo: log)
+        defer { try? output.close() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        process.arguments = ["-XCTest", "\(NSStringFromClass(IssueDraftTests.self))/testOversizedGameNamesFinishWithBoundedLinks",
+                             Bundle(for: IssueDraftTests.self).bundleURL.path]
+        process.currentDirectoryURL = folder
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+            return XCTFail("issue draft child exceeded 10-second limit")
+        }
+        process.waitUntilExit()
+        let diagnostic = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertEqual(process.terminationReason, .exit, diagnostic)
+        XCTAssertEqual(process.terminationStatus, 0, diagnostic)
+        let result = try JSONDecoder().decode([String: Int].self, from: Data(contentsOf: folder.appendingPathComponent(resultName)))
+        XCTAssertEqual(result, ["completed": 6])
     }
 
     func testTheEngineIssueGoesUpstreamWithItsOwnForm() throws {

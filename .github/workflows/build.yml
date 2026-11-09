@@ -1,8 +1,6 @@
 name: Build
 
 on:
-  push:
-    branches: [main, 'codex/main-integration']
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -27,6 +25,13 @@ on:
         required: false
         default: false
         type: boolean
+  workflow_call:
+    inputs:
+      validate-source:
+        description: Validate the caller commit without merging pull requests
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -43,7 +48,7 @@ env:
 
 jobs:
   eligibility:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/main-integration'
+    if: inputs.validate-source || github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/main-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -67,6 +72,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr }}
           LINUX_BUILD: ${{ inputs.linux }}
           FULL_BUILD: ${{ inputs.full }}
+          VALIDATE_SOURCE: ${{ inputs.validate-source }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -155,13 +161,13 @@ jobs:
               { os: 'macos-latest', compiler: 'clang++' },
               ...(intelMac ? [{ os: 'macos-latest', compiler: 'clang++', architectures: 'x86_64' }] : []),
             ]);
-            if (context.eventName === 'push') {
+            if (context.eventName === 'push' || process.env.VALIDATE_SOURCE === 'true') {
               if (!['refs/heads/main', 'refs/heads/codex/main-integration'].includes(context.ref)) {
                 throw new Error('Automatic full builds require main or the integration branch');
               }
               let paths = [];
               let all = true;
-              if (!/^0+$/.test(context.payload.before)) {
+              if (context.eventName === 'push' && !/^0+$/.test(context.payload.before)) {
                 try {
                   const { data } = await github.rest.repos.compareCommitsWithBasehead({
                     owner, repo, basehead: `${context.payload.before}...${context.sha}`
@@ -286,11 +292,12 @@ jobs:
 
   relinker:
     needs: eligibility
-    if: ${{ needs.eligibility.outputs.relinker == 'true' }}
+    if: ${{ !cancelled() && needs.eligibility.outputs.relinker == 'true' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.eligibility.outputs.relinker-hosts) }}
     env:
@@ -370,10 +377,11 @@ jobs:
       - run: ctest --test-dir build-relinker-asan --output-on-failure --timeout 120 --label-regex '^tls_function_coverage$' --no-tests=error
 
   register-context:
-    needs: eligibility
-    if: ${{ needs.eligibility.outputs.register-context == 'true' }}
+    needs: [eligibility, relinker]
+    if: ${{ !cancelled() && needs.eligibility.outputs.register-context == 'true' }}
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         os: [ubuntu-latest, macos-15-intel]
         configuration: [Debug, Release]
@@ -418,10 +426,11 @@ jobs:
       - run: ctest --test-dir build/register-context --output-on-failure --repeat until-fail:3 --no-tests=error
 
   write-watch:
-    needs: eligibility
-    if: ${{ needs.eligibility.outputs.write-watch == 'true' }}
+    needs: [eligibility, register-context]
+    if: ${{ !cancelled() && needs.eligibility.outputs.write-watch == 'true' }}
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         os: ${{ github.event_name == 'pull_request' && fromJSON('["macos-15"]') || fromJSON('["macos-15-intel", "macos-15"]') }}
         architectures: ['']
@@ -459,7 +468,7 @@ jobs:
 
   linux:
     needs: eligibility
-    if: ${{ !github.event.repository.fork && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.linux)) && needs.eligibility.outputs.full == 'true' }}
+    if: ${{ !github.event.repository.fork && (inputs.validate-source || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.linux)) && needs.eligibility.outputs.full == 'true' }}
     runs-on: [self-hosted, linux, x64, anyps5]
     timeout-minutes: 60
     env:
@@ -765,10 +774,11 @@ jobs:
             END { for (name in max) if (max[name] > 30) printf "::warning title=Slow test::%s took %.1f s on %s; tests must finish in 30 s (CONTRIBUTING.md)\n", name, max[name], ENVIRON["RUNNER_OS"] }' ctest.log
 
   edge-watch:
-    needs: eligibility
-    if: ${{ needs.eligibility.outputs.edge-watch == 'true' }}
+    needs: [eligibility, write-watch]
+    if: ${{ !cancelled() && needs.eligibility.outputs.edge-watch == 'true' }}
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         os: [macos-15-intel, macos-15]
     runs-on: ${{ matrix.os }}
