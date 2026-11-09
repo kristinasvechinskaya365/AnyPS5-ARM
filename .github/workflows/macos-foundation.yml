@@ -14,6 +14,8 @@ on:
       - core/libs/prx/libc/**
       - core/libs/prx/libkernel/**
       - core/libs/tests/GuestDirectMemory*.cpp
+      - core/libs/tests/WriteWatch.cpp
+      - core/libs/tests/write_watch/**
       - tools/title_run.py
       - tools/titles.json
       - tools/required_test_report.py
@@ -34,6 +36,8 @@ on:
       - core/libs/prx/libc/**
       - core/libs/prx/libkernel/**
       - core/libs/tests/GuestDirectMemory*.cpp
+      - core/libs/tests/WriteWatch.cpp
+      - core/libs/tests/write_watch/**
       - tools/title_run.py
       - tools/titles.json
       - tools/required_test_report.py
@@ -124,7 +128,7 @@ jobs:
     timeout-minutes: 75
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
-      REQUIRED_TESTS: '^(guest_direct_memory_lifecycle|guest_direct_memory_for_app|title_run|macos_output|macos_fixed_base|sce_module_path)$'
+      REQUIRED_TESTS: '^(guest_direct_memory_lifecycle|guest_direct_memory_for_app|title_run|macos_output|macos_fixed_base|sce_module_path|macos_fixtures_(argv|import|tls))$'
     steps:
       - name: Check out tested revision and pinned submodules
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -162,17 +166,23 @@ jobs:
       - name: Build the relinker and required memory fixtures
         run: |
           cmake --build build-foundation --parallel 2 --target \
-            relinker guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests 2>&1 | tee diagnostics/build.log
+            relinker guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests macos_fixture_libraries 2>&1 | tee diagnostics/build.log
           file build-foundation/tests/guest_direct_memory_lifecycle_tests build-foundation/core/relinker/relinker > diagnostics/binaries.txt
           lipo build-foundation/tests/guest_direct_memory_lifecycle_tests -verify_arch x86_64
           lipo build-foundation/core/relinker/relinker -verify_arch x86_64
           shasum -a 256 build-foundation/tests/guest_direct_memory_lifecycle_tests \
             build-foundation/core/relinker/relinker build-foundation/core/libs/libs/unpatched/libkernel.prx \
-            build-foundation/core/libs/libs/unpatched/libc.prx > diagnostics/binary-sha256.txt
+            build-foundation/core/libs/libs/unpatched/libc.prx build-foundation/core/libs/libs/libkernel.prx \
+            build-foundation/core/libs/libs/libc.prx > diagnostics/binary-sha256.txt
       - name: Execute required tests without retries or exclusions
         run: |
           ctest --test-dir build-foundation -R "$REQUIRED_TESTS" --output-on-failure \
             --timeout 30 --parallel 1 --no-tests=error --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Repeat required runtime fixtures ten times
+        run: |
+          ctest --test-dir build-foundation -R '^macos_fixtures_(argv|import|tls)$' --repeat until-fail:10 \
+            --output-on-failure --timeout 30 --parallel 1 --no-tests=error \
+            --output-junit "$PWD/diagnostics/fixture-repeat.xml" 2>&1 | tee diagnostics/fixture-repeat.log
       - name: Require every selected test to report a pass
         if: always()
         run: |
@@ -180,7 +190,15 @@ jobs:
             --junit diagnostics/ctest.xml --output diagnostics/runtime-report.json \
             --known-failures .github/anytogether-ci/ctest-known-failures.txt \
             --require guest_direct_memory_lifecycle --require guest_direct_memory_for_app \
-            --require title_run --require macos_output --require macos_fixed_base --require sce_module_path
+            --require title_run --require macos_output --require macos_fixed_base --require sce_module_path \
+            --require macos_fixtures_argv --require macos_fixtures_import --require macos_fixtures_tls
+      - name: Require the repeated fixtures to report passes
+        if: always()
+        run: |
+          python3 tools/required_test_report.py --inventory diagnostics/ctest-inventory.json \
+            --junit diagnostics/fixture-repeat.xml --output diagnostics/fixture-repeat-report.json \
+            --known-failures .github/anytogether-ci/ctest-known-failures.txt \
+            --require macos_fixtures_argv --require macos_fixtures_import --require macos_fixtures_tls
       - name: Upload runtime diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -191,6 +209,7 @@ jobs:
             build-foundation/CMakeCache.txt
             build-foundation/CMakeFiles/CMakeConfigureLog.yaml
             build-foundation/Testing/Temporary/
+            build-foundation/core/relinker/macos-fixtures/
           retention-days: 7
           if-no-files-found: error
 
@@ -240,9 +259,127 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  macos-write-watch:
+    name: macOS write-watch regression comparison
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      BASELINE_REVISION: 13f46b088c4021266bf0e811a787dfce5332c7cd
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+      - name: Check out candidate and baseline history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Record source and host identity
+        run: |
+          mkdir -p diagnostics
+          {
+            git rev-parse HEAD
+            git rev-parse "$BASELINE_REVISION"
+            sw_vers
+            uname -a
+            xcrun clang --version
+            cmake --version
+          } > diagnostics/identity.txt
+          test "$(uname -m)" = arm64
+          git diff "$BASELINE_REVISION" -- core/libs/prx/libc/src/GuestWriteWatch.cpp > diagnostics/write-watch-fix.patch
+      - name: Install Rosetta and Ninja
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          brew install ninja 2>&1 | tee diagnostics/ninja.log
+          arch -x86_64 uname -m
+      - name: Build both runtime revisions with the identical regression fixture
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/watch-baseline" "$BASELINE_REVISION"
+          cp core/libs/tests/WriteWatch.cpp "$RUNNER_TEMP/watch-baseline/core/libs/tests/WriteWatch.cpp"
+          cp core/libs/tests/write_watch/CMakeLists.txt "$RUNNER_TEMP/watch-baseline/core/libs/tests/write_watch/CMakeLists.txt"
+          cmp core/libs/tests/WriteWatch.cpp "$RUNNER_TEMP/watch-baseline/core/libs/tests/WriteWatch.cpp"
+          cmp core/libs/tests/write_watch/CMakeLists.txt "$RUNNER_TEMP/watch-baseline/core/libs/tests/write_watch/CMakeLists.txt"
+          shasum -a 256 core/libs/tests/WriteWatch.cpp core/libs/tests/write_watch/CMakeLists.txt \
+            core/libs/prx/libc/src/GuestWriteWatch.cpp \
+            "$RUNNER_TEMP/watch-baseline/core/libs/prx/libc/src/GuestWriteWatch.cpp" > diagnostics/source-sha256.txt
+          cmake -S "$RUNNER_TEMP/watch-baseline/core/libs/tests/write_watch" -B build-watch-baseline -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 2>&1 | tee diagnostics/baseline-configure.log
+          cmake --build build-watch-baseline --target write_watch_tests --parallel 2 2>&1 | tee diagnostics/baseline-build.log
+          cmake -S core/libs/tests/write_watch -B build-write-watch -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 2>&1 | tee diagnostics/candidate-configure.log
+          cmake --build build-write-watch --target write_watch_tests --parallel 2 2>&1 | tee diagnostics/candidate-build.log
+          lipo build-watch-baseline/tests/write_watch_tests -verify_arch x86_64
+          lipo build-write-watch/tests/write_watch_tests -verify_arch x86_64
+          shasum -a 256 build-watch-baseline/tests/write_watch_tests build-write-watch/tests/write_watch_tests > diagnostics/binary-sha256.txt
+          ctest --test-dir build-write-watch --show-only=json-v1 --no-tests=error > diagnostics/watch-inventory.json
+      - name: Require the unchanged runtime to reproduce snapshot retention
+        run: |
+          python3 - <<'PY' 2>&1 | tee diagnostics/baseline-check.log
+          import json
+          import os
+          import re
+          import signal
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          out = Path("diagnostics")
+          with (out / "baseline.stdout.log").open("wb") as stdout, (out / "baseline.stderr.log").open("wb") as stderr:
+              process = subprocess.Popen(["build-watch-baseline/tests/write_watch_tests", "host-hot"],
+                                         stdout=stdout, stderr=stderr, start_new_session=True)
+              try:
+                  code = process.wait(timeout=30)
+              except subprocess.TimeoutExpired:
+                  os.killpg(process.pid, signal.SIGKILL)
+                  try:
+                      process.wait(timeout=2)
+                  except subprocess.TimeoutExpired:
+                      pass
+                  raise SystemExit("Baseline timed out; this does not establish snapshot retention")
+          output = (out / "baseline.stdout.log").read_text(errors="replace") + (out / "baseline.stderr.log").read_text(errors="replace")
+          print(output)
+          match = re.search(r"hot host-write heap: before=(\d+) hot=(\d+) after=(\d+) allowance=(\d+)", output)
+          measured = dict(zip(("before", "hot", "after", "allowance"), map(int, match.groups()))) if match else {}
+          reproduced = code == 1 and "hot-page snapshots outlived their host-written range" in output and bool(measured)
+          if measured:
+              reproduced = reproduced and measured["allowance"] > 0 and measured["after"] > measured["before"] + measured["allowance"]
+              reproduced = reproduced and measured["hot"] - measured["before"] >= 16 * measured["allowance"]
+          result = {"baseline_revision": os.environ["BASELINE_REVISION"], "candidate_revision": os.environ["GITHUB_SHA"],
+                    "exit_code": code, "snapshot_retention_reproduced": reproduced, "heap_bytes": measured,
+                    "fixture": "candidate fixture and CMake registration copied unchanged into baseline worktree"}
+          (out / "baseline-report.json").write_text(json.dumps(result, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("### Write-watch baseline\n\nSnapshot retention reproduced: " + str(reproduced) + "\n\n")
+              summary.write(json.dumps(measured, sort_keys=True) + "\n")
+          sys.exit(not reproduced)
+          PY
+      - name: Require candidate host-write and adjacent behavior
+        run: |
+          ctest --test-dir build-write-watch -R '^write_watch_(host-hot|host|hot|collect|register)$' \
+            --verbose --output-on-failure --timeout 30 --parallel 1 --no-tests=error \
+            --output-junit "$PWD/diagnostics/watch.xml" 2>&1 | tee diagnostics/watch.log
+      - name: Require every write-watch case to report a pass
+        if: always()
+        run: |
+          python3 tools/required_test_report.py --inventory diagnostics/watch-inventory.json \
+            --junit diagnostics/watch.xml --output diagnostics/watch-report.json \
+            --require write_watch_host-hot --require write_watch_host --require write_watch_hot \
+            --require write_watch_collect --require write_watch_register
+      - name: Upload paired write-watch evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: foundation-macos-write-watch-${{ github.sha }}
+          path: |
+            diagnostics/
+            build-write-watch/Testing/Temporary/
+            build-watch-baseline/CMakeCache.txt
+            build-write-watch/CMakeCache.txt
+          retention-days: 7
+          if-no-files-found: error
+
   foundation-ok:
     name: macos-foundation-ok
-    needs: [portable-tools, macos-runtime, macos-installer]
+    needs: [portable-tools, macos-runtime, macos-installer, macos-write-watch]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -257,7 +394,7 @@ jobs:
           import sys
 
           jobs = json.loads(os.environ["JOB_RESULTS"])
-          required = {"portable-tools", "macos-runtime", "macos-installer"}
+          required = {"portable-tools", "macos-runtime", "macos-installer", "macos-write-watch"}
           failed = sorted(name for name in required if jobs.get(name, {}).get("result") != "success")
           summary = "### macOS foundation jobs\n\n" + "\n".join(f"- {name}: {jobs.get(name, {}).get('result', 'missing')}" for name in sorted(required)) + "\n"
           print(summary)
