@@ -20,6 +20,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/ndr.h>
+#include <malloc/malloc.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -441,6 +442,48 @@ int PageProtection(const void* page) {
     mach_port_t object = MACH_PORT_NULL;
     Require(mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS && address <= reinterpret_cast<mach_vm_address_t>(page), "cannot read the kernel protection of a page");
     return ((info.protection & VM_PROT_READ) ? PROT_READ : 0) | ((info.protection & VM_PROT_WRITE) ? PROT_WRITE : 0) | ((info.protection & VM_PROT_EXECUTE) ? PROT_EXEC : 0);
+}
+
+std::size_t HeapBytes() {
+    malloc_statistics_t stats{};
+    malloc_zone_statistics(nullptr, &stats);
+    return stats.size_in_use;
+}
+
+void CheckHotHostWrite() {
+    Require(GuestWriteWatchAvailable_nid_postfix(), "write watch is unavailable");
+    constexpr std::size_t hotPages = 128;
+    constexpr std::size_t stride = 4;
+    Region region(hotPages * stride);
+    std::set<std::size_t> written;
+    for (std::size_t index = 0; index < hotPages; ++index) written.insert(index * stride);
+    GuestWriteWatchRegister_nid_postfix(region.base, region.bytes);
+    Require(region.Collect() == All(hotPages * stride), "a new range is not reported in full");
+    const auto before = HeapBytes();
+    for (int round = 1; round <= 6; ++round) {
+        for (const auto index : written) static_cast<volatile std::uint8_t*>(region.base)[index * region.page] = static_cast<std::uint8_t>(round);
+        Require(region.Collect() == written, "a hot page's writes are not reported exactly");
+    }
+    Require(region.Collect().empty(), "unchanged hot pages are reported");
+    for (const auto index : written) Require(PageProtection(region.base + index * region.page) == (PROT_READ | PROT_WRITE), "a repeatedly written page did not become hot");
+    const auto hot = HeapBytes();
+    Require(hot >= before && hot - before >= hotPages * region.page, "hot pages did not allocate observable snapshot storage");
+    for (const auto index : written) {
+        auto* page = region.base + index * region.page;
+        GuestWriteWatchBeginHostWrite_nid_postfix(page, region.page);
+        *page = 0x7f;
+        Require(region.Collect(&GuestWriteWatchCollect_nid_postfix, index, 1) == std::set<std::size_t>({index}), "a host write to a hot page was not reported while open");
+        GuestWriteWatchEndHostWrite_nid_postfix(page, region.page);
+    }
+    Require(GuestWriteWatchUnregister_nid_postfix(region.base, region.bytes), "the host-written range was not unregistered");
+    const auto after = HeapBytes();
+    std::printf("hot host-write heap: before=%zu hot=%zu after=%zu allowance=%zu\n", before, hot, after, 8 * region.page);
+    Require(after <= before || after - before <= 8 * region.page, "hot-page snapshots outlived their host-written range");
+    GuestWriteWatchRegister_nid_postfix(region.base, region.bytes);
+    Require(region.Collect() == All(hotPages * stride), "the re-registered range is not reported in full");
+    region.base[0] = 0x5a;
+    Require(region.Collect() == std::set<std::size_t>({0}), "a guest write after re-registration was missed");
+    Require(region.Collect().empty(), "a guest write after re-registration was reported twice");
 }
 
 struct TrapLog {
@@ -884,7 +927,7 @@ void CheckFaultAhead(bool enabled) {
 
 int main(int argc, char** argv) {
     try {
-        Require(argc == 2, "expected collect, fresh, armed, register, mapped, host, empty, protection, overlaps, threads, hot, chain, fatal, raised, fault-ahead, fault-ahead-off, read-trap, read-trap-threads, read-trap-fault, read-trap-late or read-trap-fault-bound");
+        Require(argc == 2, "expected collect, fresh, armed, register, mapped, host, host-hot, empty, protection, overlaps, threads, hot, chain, fatal, raised, fault-ahead, fault-ahead-off, read-trap, read-trap-threads, read-trap-fault, read-trap-late or read-trap-fault-bound");
         const std::string_view mode(argv[1]);
         if (mode == "collect") CheckCollect();
         else if (mode == "fresh") CheckFresh();
@@ -892,6 +935,7 @@ int main(int argc, char** argv) {
         else if (mode == "register") CheckRegisterAgain();
         else if (mode == "mapped") CheckRegisterMapped();
         else if (mode == "host") CheckHostWrite();
+        else if (mode == "host-hot") CheckHotHostWrite();
         else if (mode == "execute-fault") CheckNonWriteFaults(true);
         else if (mode == "read-fault") CheckNonWriteFaults(false);
         else if (mode == "empty") CheckEmptyRanges();
