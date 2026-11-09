@@ -517,6 +517,8 @@ public:
         } else if (!GuestArena::GuestArenaForgetReusableSection_nid_no_patch(section) || !SectionPool::Get().Keep(section, bytes)) {
             CloseHandle(section);
         }
+#elif defined(__APPLE__)
+        if (file >= 0) ::close(file);
 #else
         if (hostWriteView != nullptr) ::munmap(hostWriteView, bytes);
 #endif

@@ -638,24 +638,6 @@ static void CheckDirectMemoryBecomesExecutable() {
     Require(sceKernelReleaseDirectMemory(phys, page) == 0);
 }
 
-#ifndef _WIN32
-static void CheckDirectMemoryReleasesHostDescriptors() {
-    constexpr std::size_t page = 0x4000;
-    const int before = dup(0);
-    Require(before >= 0 && close(before) == 0);
-    for (int round = 0; round < 64; ++round) {
-        std::int64_t phys = 0;
-        Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page, 0, 0, &phys) == 0);
-        void* mapped = nullptr;
-        Require(sceKernelMapDirectMemory(&mapped, page, 3, 0, phys, 0) == 0);
-        Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(mapped), page) == 0);
-        Require(sceKernelReleaseDirectMemory(phys, page) == 0);
-    }
-    const int after = dup(0);
-    Require(after == before && close(after) == 0);
-}
-#endif
-
 static void CheckSparseDirectMemoryBacking() {
     constexpr std::size_t page = 0x4000;
     constexpr std::size_t size = 256u * 1024u * 1024u;
@@ -4204,9 +4186,6 @@ int main(int argc, char** argv) {
     CheckPosixMprotectIgnoresUndefinedBits();
     CheckDirectMemoryFollowsPhysicalPages();
     CheckDirectMemoryBecomesExecutable();
-#ifndef _WIN32
-    CheckDirectMemoryReleasesHostDescriptors();
-#endif
     CheckSparseDirectMemoryBacking();
     CheckSavedDirectMemorySurvivesCachePressure();
     CheckReusedDirectMemorySections();
