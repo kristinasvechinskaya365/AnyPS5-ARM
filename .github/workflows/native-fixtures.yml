@@ -1,0 +1,253 @@
+name: Native arm64 fixtures
+
+on:
+  push:
+    branches: ['codex/native-*']
+    paths:
+      - .github/workflows/native-fixtures.yml
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/libs/**
+      - core/relinker/**
+      - tools/translator/**
+      - tools/tests/test_native_fixture_runner.py
+      - docs/dev/NATIVE_ARM64.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-fixtures-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native-fixtures:
+    name: Required native arm64 CPU fixtures
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      REQUIRED_CTESTS: '^native_(fixture_reporting|translator_cli)$'
+    steps:
+      - name: Check out tested revision and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Record source and native host identity
+        run: |
+          mkdir -p diagnostics/native
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            sw_vers
+            uname -a
+            sysctl hw.model hw.memsize hw.ncpu machdep.cpu.brand_string
+            xcodebuild -version
+            xcrun clang --version
+            xcrun --sdk macosx --show-sdk-path
+            cmake --version
+            python3 --version
+            printf 'Build cache: none restored\nCoverage: native CPU fixtures and Rosetta vector reference; no game or GPU validation\n'
+          } 2>&1 | tee diagnostics/identity.txt
+          python3 - <<'PY'
+          import json
+          import os
+          import platform
+          import subprocess
+          from pathlib import Path
+
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          data = {
+              "revision": revision, "event_revision": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "repository": os.environ["GITHUB_REPOSITORY"], "host": platform.platform(),
+              "machine": platform.machine(), "python": platform.python_version(),
+              "submodules": subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True),
+          }
+          Path("diagnostics/source.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          if revision != data["event_revision"] or platform.system() != "Darwin" or platform.machine() != "arm64":
+              raise SystemExit("requires the event revision and a native arm64 Python process on macOS")
+          PY
+          test "$(uname -m)" = arm64
+      - name: Install the documented LLVM toolchain and Rosetta reference
+        timeout-minutes: 20
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          brew install llvm@22 lld@22 capstone ninja 2>&1 | tee diagnostics/homebrew.log
+          printf 'ANYPS5_LLVM_BIN=%s/bin\n' "$(brew --prefix llvm@22)" >> "$GITHUB_ENV"
+          printf 'SDKROOT=%s\n' "$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$(brew --prefix lld@22)" >> "$GITHUB_PATH"
+          brew info --json=v2 llvm@22 lld@22 capstone ninja > diagnostics/homebrew.json
+          arch -x86_64 uname -m | tee diagnostics/reference-architecture.txt
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Configure the native translator and runtime
+        run: |
+          {
+            "$ANYPS5_LLVM_BIN/clang" --version
+            "$ANYPS5_LLVM_BIN/clang++" --version
+            "$ANYPS5_LLVM_BIN/llvm-nm" --version
+            "$ANYPS5_LLVM_BIN/llvm-objcopy" --version
+            ld.lld --version
+            clang++ --version
+            ninja --version
+          } 2>&1 | tee diagnostics/toolchain.txt
+          cmake -S tools/translator -B build-translator -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DPython3_EXECUTABLE="$(command -v python3)" \
+            -DLLVM_DIR="$(brew --prefix llvm@22)/lib/cmake/llvm" \
+            -DCAPSTONE_INCLUDE_DIR="$(brew --prefix capstone)/include" \
+            -DCAPSTONE_LIBRARY="$(brew --prefix capstone)/lib/libcapstone.a" 2>&1 | tee diagnostics/translator-configure.log
+          ctest --test-dir build-translator --show-only=json-v1 --no-tests=error > diagnostics/ctest-inventory.json
+      - name: Build and identify native translation binaries
+        timeout-minutes: 20
+        run: |
+          cmake --build build-translator --target aps5-translator aps5-translator-runtime --parallel 2 2>&1 | tee diagnostics/translator-build.log
+          file build-translator/aps5-translator build-translator/libaps5-translator-runtime.a | tee diagnostics/translator-binaries.txt
+          lipo build-translator/aps5-translator -verify_arch arm64
+          lipo build-translator/libaps5-translator-runtime.a -verify_arch arm64
+          build-translator/aps5-translator --build-info --cpu apple-m1 | tee diagnostics/translator-build-info.json
+      - name: Run both required translator CTests
+        run: |
+          ctest --test-dir build-translator -R "$REQUIRED_CTESTS" --output-on-failure \
+            --timeout 30 --parallel 2 --no-tests=error \
+            --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Build only the patched native libc fixture dependency
+        timeout-minutes: 25
+        run: |
+          cmake -S . -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 2>&1 | tee diagnostics/libc-configure.log
+          cmake --build build-arm64 --target core/libs/libs/libc.prx --parallel 2 2>&1 | tee diagnostics/libc-build.log
+          file build-arm64/core/libs/libs/libc.prx | tee diagnostics/libc-binary.txt
+          lipo build-arm64/core/libs/libs/libc.prx -verify_arch arm64
+          shasum -a 256 build-translator/aps5-translator build-translator/libaps5-translator-runtime.a \
+            build-arm64/core/libs/libs/libc.prx > diagnostics/binary-sha256.txt
+      - name: Execute every required native fixture and the vector reference
+        timeout-minutes: 10
+        run: |
+          python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm64/core/libs/libs \
+            diagnostics/native --cpu apple-m1 --report diagnostics/native/report.json 2>&1 | tee diagnostics/native.log
+      - name: Require complete test and fixture evidence
+        if: always()
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY' 2>&1 | tee diagnostics/gate.log
+          import hashlib
+          import json
+          import os
+          import re
+          import struct
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          errors = []
+          required_ctests = {"native_fixture_reporting": 17, "native_translator_cli": 4}
+          required_fixtures = ["import", "lifter-smoke", "vector-smoke"]
+
+          def require(condition, message):
+              if not condition:
+                  errors.append(message)
+
+          def verify_file(identity, expected):
+              path = Path(identity["path"])
+              require(path.resolve() == expected.resolve(), f"unexpected input path: {path}")
+              require(identity["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest(), f"file digest mismatch: {path}")
+
+          try:
+              inventory = json.loads(Path("diagnostics/ctest-inventory.json").read_text())
+              registered = [test["name"] for test in inventory["tests"]]
+              for name in required_ctests:
+                  require(registered.count(name) == 1, f"required CTest not registered exactly once: {name}")
+              cases = list(ET.parse("diagnostics/ctest.xml").iter("testcase"))
+              require(sorted(case.get("name") for case in cases) == sorted(required_ctests), "CTest results are missing, duplicated or unexpected")
+              for case in cases:
+                  name = case.get("name")
+                  require(case.get("status") == "run" and not any(case.find(tag) is not None for tag in ("failure", "error", "skipped")), f"CTest did not pass: {name}")
+                  output = case.findtext("system-out", default="")
+                  counts = re.findall(r"^Ran ([0-9]+) tests? in .+$", output, re.MULTILINE)
+                  require(len(counts) == 1 and int(counts[0]) >= required_ctests.get(name, sys.maxsize), f"missing required unittest execution count: {name}")
+                  require(re.search(r"^OK\s*$", output, re.MULTILINE) is not None and not re.search(r"^OK \(", output, re.MULTILINE), f"unittest results include skips or incomplete evidence: {name}")
+          except (OSError, ValueError, TypeError, KeyError, ET.ParseError) as error:
+              errors.append(f"CTest evidence: {error}")
+
+          try:
+              source = json.loads(Path("diagnostics/source.json").read_text())
+              require(source["revision"] == source["event_revision"] == os.environ["GITHUB_SHA"], "source revision does not match this run")
+              report = json.loads(Path("diagnostics/native/report.json").read_text())
+              require(type(report["schema_version"]) is int and report["schema_version"] == 1 and report["suite"] == "native-arm64", "unsupported native report schema")
+              require(report["required_fixtures"] == required_fixtures and [case["name"] for case in report["fixtures"]] == required_fixtures, "required native fixture inventory is incomplete")
+              require(report["complete"] is True and report["passed"] is True and report["counts"] == {"required": 3, "pass": 3, "fail": 0, "skip": 0}, "native fixture counts do not show three required passes")
+              provenance = report["provenance"]
+              require(provenance["host"]["system"] == "Darwin" and provenance["host"]["machine"] == "arm64" and provenance["requested_cpu"] == "apple-m1", "fixture host or selected CPU is incorrect")
+              info = provenance["translator"]["build_info"]
+              require(info["schema_version"] == 1 and info["target_cpu"] == "apple-m1" and info["target_triple"] == "arm64-apple-macosx13.0.0" and info["optimization"] == "O2" and re.match(r"^22\.", info["llvm_version"]), "translator build identity does not match the required toolchain")
+              for name, path in {
+                  "translator": "build-translator/aps5-translator",
+                  "runtime": "build-translator/libaps5-translator-runtime.a",
+                  "libc": "build-arm64/core/libs/libs/libc.prx",
+                  "runner": "tools/translator/tests/run_native_fixtures.py",
+                  "guesttools": "core/relinker/relinker/tests/macos/guesttools.py",
+              }.items():
+                  verify_file(provenance[name], Path(path))
+              for name in ("guest_clang", "guest_clangxx", "llvm_nm", "llvm_objcopy", "guest_linker", "native_linker", "reference_arch"):
+                  tool = provenance["tools"][name]
+                  require(tool["available"] is True and Path(tool["path"]).is_file() and (name == "reference_arch" or bool(tool["version"])), f"required tool did not run: {name}")
+              work = Path(report["work"]).resolve()
+              require(work.is_relative_to(Path("diagnostics/native").resolve()), "fixture evidence is outside the artifact directory")
+              for case in report["fixtures"]:
+                  name = case["name"]
+                  require(case["required"] is True and case["status"] == "pass" and case["stage"] == "compare", f"native fixture did not pass: {name}")
+                  require(case["actual"] == case["expected"], f"native result differs from its reference: {name}")
+                  stages = ["translate", "native-link", "native-run"]
+                  if name == "vector-smoke":
+                      stages = ["reference-build", "reference-run", *stages]
+                  require([command["stage"] for command in case["commands"]] == stages, f"missing fixture command evidence: {name}")
+                  for command in case["commands"]:
+                      expected_exit = case["expected"]["exit_code"] if command["stage"] in ("native-run", "reference-run") else 0
+                      require(type(command["returncode"]) is int and command["returncode"] == expected_exit and "error" not in command, f"fixture command failed: {name}/{command['stage']}")
+                      for stream in ("stdout", "stderr"):
+                          log = Path(command[stream]).resolve()
+                          require(log.is_relative_to(work) and log.is_file(), f"missing retained log: {name}/{command['stage']}/{stream}")
+                      if command["stage"] in ("native-run", "reference-run"):
+                          require(Path(command["stdout"]).read_text().strip() == case["expected"]["stdout"], f"recorded output differs from the executed output: {name}/{command['stage']}")
+                  if name == "vector-smoke":
+                      checksum = case["expected"]["stdout"]
+                      require(re.fullmatch(r"[0-9a-f]{16}", checksum) is not None and case["expected"]["exit_code"] == (int(checksum, 16) & 0x7f), "vector reference checksum is invalid")
+                  executable = work / name / "eboot"
+                  verify_file(case["executable"], executable)
+                  header = executable.read_bytes()[:32]
+                  require(len(header) == 32 and struct.unpack_from("<I", header)[0] == 0xFEEDFACF and struct.unpack_from("<I", header, 4)[0] == 0x0100000C and struct.unpack_from("<I", header, 12)[0] == 2, f"executed fixture is not a thin arm64 Mach-O executable: {name}")
+          except (OSError, ValueError, TypeError, KeyError, struct.error) as error:
+              errors.append(f"native fixture evidence: {error}")
+
+          result = {"revision": os.environ.get("GITHUB_SHA"), "passed": not errors, "required_ctests": list(required_ctests), "required_fixtures": required_fixtures, "errors": errors}
+          Path("diagnostics/gate.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+          summary = f"### Native arm64 fixture gate\n\nRevision: `{result['revision']}`\n\nResult: {'FAIL' if errors else 'PASS'}; required CTests: 2; required native fixtures: 3.\n\n"
+          summary += "\n".join(f"- {error}" for error in errors) + "\n\nCoverage: native CPU fixtures with an x86-64 Rosetta vector reference. This run does not validate games or GPU behavior.\n"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+              stream.write(summary)
+          print(json.dumps(result, indent=2))
+          raise SystemExit(bool(errors))
+          PY
+      - name: Upload native fixture diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-fixtures-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/
+            build-translator/CMakeCache.txt
+            build-translator/CMakeFiles/CMakeConfigureLog.yaml
+            build-translator/Testing/Temporary/
+            build-arm64/CMakeCache.txt
+            build-arm64/CMakeFiles/CMakeConfigureLog.yaml
+          retention-days: 7
+          if-no-files-found: error
