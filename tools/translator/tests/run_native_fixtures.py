@@ -24,8 +24,10 @@ from import_fixture import fixture as import_fixture
 
 
 VECTOR_FLAGS = ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"]
-REQUIRED = ("import", "lifter-smoke", "vector-smoke", "cmpxchg-alias")
+REQUIRED = ("import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register")
 REFERENCES = {"vector-smoke": ("vector_smoke.c", VECTOR_FLAGS), "cmpxchg-alias": ("cmpxchg_alias.c", [])}
+AMD_FLAGS = ["-DCMPXCHG_AMD_REGISTERS"]
+AMD_CONTRACT = "AMD64 CMPXCHG conditional register writes"
 COMPILED_TOOLS = ("guest_clang", "guest_clangxx", "llvm_nm", "llvm_objcopy", "guest_linker")
 TIMEOUT = 30
 
@@ -89,6 +91,7 @@ def toolchain_identity():
              "llvm_objcopy": llvm / "llvm-objcopy", "guest_linker": shutil.which("ld.lld"), "native_linker": shutil.which("clang++")}
     tools = {name: tool_identity(path) for name, path in paths.items()}
     tools["reference_arch"] = tool_identity(shutil.which("arch"), version=False)
+    tools["reference_python"] = tool_identity(sys.executable)
     return tools
 
 
@@ -137,6 +140,24 @@ def host_reference(directory, tools, commands, source, flags):
     if not re.fullmatch(r"[0-9a-f]{16}", output) or result.returncode != (int(output, 16) & 0x7f):
         raise FixtureFailure("reference-run", f"reference did not produce its checksum and matching exit code: exit {result.returncode}, output {output!r}")
     return {"exit_code": result.returncode, "stdout": output}
+
+
+def amd_reference(directory, tools, result):
+    model = HERE / "cmpxchg_amd_model.py"
+    result["reference"] = {"execution": "native Python integer model", "contract": AMD_CONTRACT,
+                           "cases": 576, "source": file_identity(model)}
+    execution = run_command([tools["reference_python"]["path"], model], directory, "reference-model", result["commands"])
+    try:
+        decoded = json.loads(execution.stdout)
+        expected = decoded["expected"]
+        if type(decoded["schema_version"]) is not int or decoded["schema_version"] != 1 or decoded["contract"] != AMD_CONTRACT or \
+                type(decoded["cases"]) is not int or decoded["cases"] != 576 or \
+                re.fullmatch(r"[0-9a-f]{16}", expected["stdout"]) is None or type(expected["exit_code"]) is not int or \
+                expected["exit_code"] != (int(expected["stdout"], 16) & 0x7f):
+            raise ValueError("unexpected model contract, case count or checksum")
+    except (ValueError, TypeError, KeyError) as error:
+        raise FixtureFailure("reference-model", f"invalid AMD integer model result: {error}") from error
+    return expected
 
 
 def check_arm64_executable(path):
@@ -231,6 +252,8 @@ def main(argv=None):
             needed = [] if name == "import" else list(COMPILED_TOOLS)
             if name in REFERENCES:
                 needed.append("reference_arch")
+            if name == "cmpxchg-amd-register":
+                needed.append("reference_python")
             missing = [tool for tool in needed if not tools[tool]["available"]]
             if blockers or missing:
                 result["reason"] = "; ".join(blockers + (["missing tools: " + ", ".join(missing)] if missing else []))
@@ -243,10 +266,16 @@ def main(argv=None):
                 (directory / "eboot.elf").write_bytes(import_fixture())
                 expected = {"exit_code": 0, "stdout": "hello from a PS5 ELF on macOS"}
             else:
-                source, flags = ("lifter_smoke.c", []) if name == "lifter-smoke" else REFERENCES[name]
+                if name == "cmpxchg-amd-register":
+                    source, flags = "cmpxchg_alias.c", AMD_FLAGS
+                else:
+                    source, flags = ("lifter_smoke.c", []) if name == "lifter-smoke" else REFERENCES[name]
                 result["source"] = file_identity(HERE / source)
+                result["compile_flags"] = flags
                 if name == "lifter-smoke":
                     expected = {"exit_code": 28, "stdout": "3b0c6e4bf8726a1c"}
+                elif name == "cmpxchg-amd-register":
+                    expected = amd_reference(directory, tools, result)
                 else:
                     result["reference"] = {"execution": "x86_64 under Rosetta", "optimization": "O0", "flags": flags}
                     expected = host_reference(directory, tools, result["commands"], source, flags)

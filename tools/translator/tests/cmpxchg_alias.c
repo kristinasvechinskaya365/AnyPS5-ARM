@@ -96,6 +96,11 @@ static void check(Exchange operation, unsigned bits, int aliased, u64 accumulato
 }
 
 static void run(void) {
+#ifdef CMPXCHG_AMD_REGISTERS
+    const int register_cases = 1;
+#else
+    const int register_cases = 0;
+#endif
     static const u64 values[] = {0, 1, 0x7f, 0x80, 0x7fff, 0x8000, 0x7fffffff, 0x80000000,
                                  0x7fffffffffffffffull, 0x8000000000000000ull, ~0ull, 0xa5a55a5affff5501ull};
     static Exchange aliases[] = {alias8, alias16, alias32, alias64};
@@ -105,13 +110,16 @@ static void run(void) {
     for (unsigned width = 0; width < 4; ++width) {
         for (unsigned left = 0; left < count; ++left) {
             const u64 source = ~values[(left + 3) % count];
-            check(aliases[width], widths[width], 1, values[left], 0, source);
-            for (unsigned right = 0; right < count; ++right) {
-                check(separate[width], widths[width], 0, values[left], values[right], source);
-            }
+            if (register_cases) {
+                for (unsigned right = 0; right < count; ++right) {
+                    check(separate[width], widths[width], 0, values[left], values[right], source);
+                }
+            } else check(aliases[width], widths[width], 1, values[left], 0, source);
         }
     }
-    for (unsigned index = 0; index < count; ++index) check(high_source, 8, 1, values[index], 0, values[index] >> 8);
+    if (!register_cases) {
+        for (unsigned index = 0; index < count; ++index) check(high_source, 8, 1, values[index], 0, values[index] >> 8);
+    }
     char text[17];
     for (unsigned index = 0; index < 16; ++index) text[index] = "0123456789abcdef"[(hash >> (60 - 4 * index)) & 15];
     text[16] = 0;
