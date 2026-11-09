@@ -83,6 +83,7 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import re
           import subprocess
 
           candidate = Path.cwd()
@@ -98,6 +99,44 @@ jobs:
                   if mode == '160000':
                       entries[path] = digest
               return entries
+          def optional_submodules(status, expected):
+              entries = {}
+              for line in status.splitlines():
+                  match = re.fullmatch(r'([ +\-U])([0-9a-f]{40}) (\S+)(?: .*)?', line)
+                  if match is None or match[3] in entries:
+                      raise SystemExit('unrecognized or duplicate dependency status')
+                  state, commit, path = match.groups()
+                  if state in ('+', 'U'):
+                      raise SystemExit(f'dependency revision mismatch: {path}')
+                  entries[path] = {'state': state, 'revision': commit}
+              for path, commit in expected.items():
+                  if entries.get(path) != {'state': ' ', 'revision': commit}:
+                      raise SystemExit(f'required dependency is missing, uninitialized or changed: {path}')
+              allowed = []
+              for path, entry in entries.items():
+                  if path in expected:
+                      continue
+                  parents = [name for name in entries if path.startswith(name + '/')]
+                  if not parents or not any(path.startswith(name + '/') for name in expected):
+                      raise SystemExit(f'dependency has no required parent: {path}')
+                  parent = max(parents, key=len)
+                  source = candidate / parent
+                  if entries[parent]['state'] != ' ' or git('rev-parse', 'HEAD', cwd=source) != entries[parent]['revision']:
+                      raise SystemExit(f'dependency parent is not at its recorded revision: {path}')
+                  relative = path[len(parent) + 1:]
+                  record = git('ls-tree', 'HEAD', '--', relative, cwd=source)
+                  if record != f"160000 commit {entry['revision']}\t{relative}":
+                      raise SystemExit(f'nested dependency differs from its pinned parent: {path}')
+                  if entry['state'] == ' ':
+                      continue
+                  declarations = git('config', '--blob', 'HEAD:.gitmodules', '--get-regexp', r'^submodule\..*\.path$', cwd=source)
+                  names = [key[:-5] for key, value in (line.split(None, 1) for line in declarations.splitlines()) if value == relative]
+                  if len(names) != 1 or git('config', '--blob', 'HEAD:.gitmodules', '--get-all', names[0] + '.update', cwd=source) != 'none':
+                      raise SystemExit(f'uninitialized dependency lacks an explicit none policy: {path}')
+                  allowed.append({'path': path, 'revision': entry['revision'], 'parent': parent,
+                                  'parent_revision': entries[parent]['revision'], 'submodule': names[0][len('submodule.'):],
+                                  'policy': 'none', 'gitmodules_blob': git('rev-parse', 'HEAD:.gitmodules', cwd=source)})
+              return allowed
           if git('rev-parse', 'HEAD') != os.environ['GITHUB_SHA']:
               raise SystemExit('the candidate is not the event revision')
           baseline_links, candidate_links = links(revision), links('HEAD')
@@ -126,10 +165,9 @@ jobs:
                                        *sorted(baseline_links)], stdout=output, stderr=subprocess.STDOUT)
           if result.returncode:
               raise SystemExit('default dependency checkout failed; see submodules.log')
-          status = git('submodule', 'status', '--recursive', '--', *sorted(baseline_links))
-          Path('diagnostics/submodules.txt').write_text(status + '\n')
-          if any(line.startswith(('-', '+', 'U')) for line in status.splitlines()):
-              raise SystemExit('a default dependency is uninitialized or at the wrong revision')
+          status = subprocess.check_output(['git', 'submodule', 'status', '--recursive', '--', *sorted(baseline_links)], text=True)
+          Path('diagnostics/submodules.txt').write_text(status)
+          optional = optional_submodules(status, baseline_links)
           subprocess.run(['git', '-c', 'submodule.recurse=false', 'worktree', 'add', '--detach', str(baseline), revision], check=True)
           for path, digest in baseline_links.items():
               source = candidate / path
@@ -149,6 +187,7 @@ jobs:
               'baseline_tree': git('rev-parse', f'{revision}^{{tree}}'),
               'candidate_tree': git('rev-parse', 'HEAD^{tree}'),
               'default_dependencies': baseline_links,
+              'optional_submodules': optional,
               'standalone_translator_dependencies': {path: candidate_links[path] for path in sorted(extra)},
               'fixtures': {path: git('rev-parse', f'{revision}:{path}') for path in fixtures},
               'tests_tree': tests_tree,
@@ -313,6 +352,10 @@ jobs:
               if actual != revision:
                   raise SystemExit(f'default dependency revision changed: {path}')
               subprocess.run(['git', 'diff', '--ignore-submodules=none', '--exit-code', 'HEAD'], cwd=source, check=True)
+          status = subprocess.check_output(['git', 'submodule', 'status', '--recursive', '--', *sorted(identity['default_dependencies'])],
+                                           cwd=identity['candidate_source'], text=True)
+          if status != Path('diagnostics/submodules.txt').read_text():
+              raise SystemExit('dependency initialization or revisions changed during execution')
           execution['source_unchanged_after_tests'] = True
           Path('diagnostics/execution.json').write_text(json.dumps(execution, indent=2) + '\n')
           if any(lane['inventory_exit'] != 0 or lane['ctest_exit'] != 0 or lane['timed_out'] for lane in execution['lanes'].values()):

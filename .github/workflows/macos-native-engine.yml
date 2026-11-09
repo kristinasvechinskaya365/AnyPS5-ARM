@@ -59,27 +59,68 @@ jobs:
           status = subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True)
           Path("diagnostics/submodules.txt").write_text(status)
           dependencies = []
+          seen = set()
           for line in status.splitlines():
               match = re.match(r"^([ +\-U])([0-9a-f]{40}) (\S+)(?: .*)?$", line)
               if match is None:
                   raise SystemExit("unrecognized submodule identity")
               state, commit, path = match.groups()
-              optional = path == "3rdparty/llvm-project"
-              if state != ("-" if optional else " "):
+              if path in seen or Path(path).is_absolute() or ".." in Path(path).parts or state not in {" ", "-"}:
                   raise SystemExit(f"submodule checkout does not match its policy: {path}")
-              dependencies.append({"path": path, "revision": commit, "initialized": not optional})
+              seen.add(path)
+              dependencies.append({"path": path, "revision": commit, "initialized": state == " "})
           if not dependencies or not any(item["path"] == "3rdparty/llvm-project" for item in dependencies):
               raise SystemExit("the complete dependency inventory is unavailable")
-          policy = subprocess.check_output(["git", "config", "-f", ".gitmodules", "submodule.3rdparty/llvm-project.update"], text=True).strip()
-          if policy != "none" or Path("3rdparty/llvm-project/llvm/CMakeLists.txt").exists():
+
+          def git(parent, *arguments):
+              return subprocess.check_output(["git", "-C", parent, *arguments], text=True).strip()
+
+          def declarations(parent):
+              result = {}
+              for line in git(parent, "config", "--blob", "HEAD:.gitmodules", "--get-regexp", r"^submodule\..*\.path$").splitlines():
+                  key, value = line.split(None, 1)
+                  if value in result or Path(value).is_absolute() or ".." in Path(value).parts:
+                      raise SystemExit("invalid committed submodule declaration")
+                  result[value] = key.removesuffix(".path")
+              return result
+
+          indexed = {item["path"]: item for item in dependencies}
+          top_level = declarations(".")
+          for path in top_level:
+              if path not in indexed or indexed[path]["initialized"] is not (path != "3rdparty/llvm-project"):
+                  raise SystemExit(f"required top-level submodule policy is not satisfied: {path}")
+          if indexed["3rdparty/llvm-project"]["initialized"] or Path("3rdparty/llvm-project/llvm/CMakeLists.txt").exists():
               raise SystemExit("the ordinary engine checkout must leave optional LLVM uninitialized")
+          optional = []
+          for dependency in dependencies:
+              path = dependency["path"]
+              parent, parent_revision = ".", revision
+              if path not in top_level:
+                  parents = [item for item in dependencies if item["initialized"] and path.startswith(item["path"] + "/")]
+                  if not parents:
+                      raise SystemExit(f"uninitialized submodule has no initialized declared parent: {path}")
+                  owner = max(parents, key=lambda item: len(item["path"]))
+                  parent, parent_revision = owner["path"], owner["revision"]
+              relative = path if parent == "." else str(Path(path).relative_to(parent))
+              if git(parent, "rev-parse", "HEAD") != parent_revision:
+                  raise SystemExit(f"submodule parent revision changed: {parent}")
+              expected = f"160000 commit {dependency['revision']}\t{relative}"
+              if git(parent, "ls-tree", "HEAD", "--", relative) != expected:
+                  raise SystemExit(f"submodule differs from the committed gitlink: {path}")
+              if dependency["initialized"]:
+                  continue
+              module = declarations(parent).get(relative)
+              if module is None or git(parent, "config", "--blob", "HEAD:.gitmodules", "--get-all", module + ".update") != "none":
+                  raise SystemExit(f"uninitialized submodule lacks a committed update=none policy: {path}")
+              optional.append({"path": path, "revision": dependency["revision"], "parent": parent, "parent_revision": parent_revision,
+                               "module": module, "update": "none", "gitmodules_blob": git(parent, "rev-parse", "HEAD:.gitmodules")})
           expected = sorted(path.name + ".prx" for path in Path("core/libs/prx").iterdir() if path.is_dir())
           required = {"libc.prx", "libkernel.prx", "libSceAgcDriver.prx", "libSceVideoOut.prx", "libSceAudioOut.prx"}
           if not required <= set(expected):
               raise SystemExit("the source library inventory is incomplete")
           report = {"schema_version": 1, "revision": revision, "host": {"system": platform.system(), "machine": platform.machine(), "release": platform.release()},
                     "gitmodules_sha256": hashlib.sha256(Path(".gitmodules").read_bytes()).hexdigest(),
-                    "optional_llvm_initialized": False, "dependencies": dependencies, "expected_prx": expected}
+                    "optional_llvm_initialized": False, "dependencies": dependencies, "optional_submodules": optional, "expected_prx": expected}
           Path("diagnostics/source.json").write_text(json.dumps(report, indent=2) + "\n")
           PY
       - name: Install build tools
@@ -156,6 +197,22 @@ jobs:
               require(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == source["revision"], "checkout revision changed during the build")
               subprocess.run(["git", "diff", "--exit-code"], check=True)
               require(subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True) == (directory / "submodules.txt").read_text(), "dependency revisions changed during the build")
+              dependencies = {item["path"]: item for item in source["dependencies"]}
+              optional = source["optional_submodules"]
+              require(len(dependencies) == len(source["dependencies"]) and all(type(item["initialized"]) is bool for item in dependencies.values()), "dependency identities are duplicated or malformed")
+              require(sorted(item["path"] for item in optional) == sorted(path for path, item in dependencies.items() if not item["initialized"]), "optional dependency receipts are incomplete")
+              for item in optional:
+                  parent, path = item["parent"], item["path"]
+                  owner = source["revision"] if parent == "." else dependencies[parent]["revision"]
+                  require(item["revision"] == dependencies[path]["revision"] and item["parent_revision"] == owner and item["update"] == "none", "optional dependency receipt identity changed")
+                  require(path == "3rdparty/llvm-project" if parent == "." else dependencies[parent]["initialized"] and path.startswith(parent + "/"), "optional dependency receipt has an invalid parent")
+                  relative = path if parent == "." else str(Path(path).relative_to(parent))
+                  def git(*arguments):
+                      return subprocess.check_output(["git", "-C", parent, *arguments], text=True).strip()
+                  require(git("rev-parse", "HEAD") == owner and git("rev-parse", "HEAD:.gitmodules") == item["gitmodules_blob"], "optional dependency parent or declarations changed")
+                  require(git("ls-tree", "HEAD", "--", relative) == f"160000 commit {item['revision']}\t{relative}", "optional dependency gitlink changed")
+                  require(git("config", "--blob", "HEAD:.gitmodules", "--get-all", item["module"] + ".path") == relative and
+                          git("config", "--blob", "HEAD:.gitmodules", "--get-all", item["module"] + ".update") == "none", "optional dependency policy changed")
               cache = {}
               for line in Path("build-native-engine/CMakeCache.txt").read_text().splitlines():
                   match = re.fullmatch(r"([^#/:=]+):[^=]+=(.*)", line)
@@ -209,7 +266,8 @@ jobs:
               errors.append(f"compile evidence: {error}")
           report = {"schema_version": 1, "revision": os.environ["GITHUB_SHA"], "passed": not errors,
                     "coverage": "full native arm64 engine compile and PRX signatures; no guest or GPU execution", "steps": outcomes,
-                    "expected_prx": source.get("expected_prx", []) if isinstance(source, dict) else [], "binaries": binaries, "errors": errors}
+                    "expected_prx": source.get("expected_prx", []) if isinstance(source, dict) else [],
+                    "optional_submodules": source.get("optional_submodules", []) if isinstance(source, dict) else [], "binaries": binaries, "errors": errors}
           (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
               stream.write(f"### Native arm64 engine compile\n\nRevision: `{report['revision']}`\n\n{'FAIL' if errors else 'PASS'}; expected PRX libraries: {len(report['expected_prx'])}.\n\nThis gate compiles the full engine and verifies ARM64 library headers and signatures. It does not execute guest code or validate GPU behavior.\n")
