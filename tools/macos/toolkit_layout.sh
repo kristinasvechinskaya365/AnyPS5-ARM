@@ -9,13 +9,50 @@
 #     libs/*.prx               the system libraries every unlocked game carries
 #     vulkan/                  the Vulkan loader, MoltenVK (patched) and its driver manifest
 #     patches/*.json           the per-title patches
-#     version.txt              "<release version>-<fingerprint of relinker, libs and patches>"
 #     toolkit.json             (downloads only) what it is and every file's sha256
 
 # The release version of the checkout: the tag without its v (0.2.14-arm), or git describe's
 # longer form between releases.
 toolkit_release_version() {
     git -C "$1" describe --tags --always 2>/dev/null | sed "s/^v//" || echo 0.0.0
+}
+
+toolkit_fingerprint() {
+    python3 - "$1" <<'EOF'
+import hashlib
+import pathlib
+import sys
+
+folder = pathlib.Path(sys.argv[1])
+try:
+    paths = ["relinker", "vulkan/libvulkan.1.dylib", "vulkan/libMoltenVK.dylib", "vulkan/MoltenVK_icd.json"]
+    for directory, suffix in (("libs", ".prx"), ("patches", ".json")):
+        entries = [f"{directory}/{entry.name}" for entry in (folder / directory).iterdir() if entry.name.endswith(suffix)]
+        if directory == "libs" and not entries:
+            raise ValueError("no libs/*.prx")
+        paths.extend(entries)
+    digest = hashlib.sha256()
+    for relative in sorted(paths, key=lambda value: value.encode("utf-8")):
+        path = folder / relative
+        if not path.is_file():
+            raise ValueError(f"{relative} is not a regular file")
+        name = relative.encode("utf-8")
+        with path.open("rb") as handle:
+            size = handle.seek(0, 2)
+            handle.seek(0)
+            digest.update(len(name).to_bytes(8, "big"))
+            digest.update(name)
+            digest.update(size.to_bytes(8, "big"))
+            read = 0
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                read += len(block)
+                digest.update(block)
+            if read != size:
+                raise ValueError(f"{relative} changed while reading")
+    print(digest.hexdigest()[:12])
+except (OSError, ValueError) as error:
+    sys.exit(f"toolkit fingerprint: {error}")
+EOF
 }
 
 # make_toolkit <repository root> <build dir> <Vulkan SDK macOS dir> <toolkit dir> <release version>
@@ -37,7 +74,7 @@ make_toolkit() {
     sed 's#"library_path": "[^"]*"#"library_path": "../../../MacOS/libs/libMoltenVK.dylib"#' "$_tk_vulkan/share/vulkan/icd.d/MoltenVK_icd.json" > "$_tk_out/vulkan/MoltenVK_icd.json"
     cp "$_tk_root"/tools/macos/patches/*.json "$_tk_out/patches/"
     # An installed game made by another toolkit can be installed again (the launcher offers it).
-    _tk_fingerprint="$(cat "$_tk_out/relinker" "$_tk_out"/libs/*.prx "$_tk_out"/patches/*.json | shasum -a 256 | cut -c1-12)"
+    _tk_fingerprint="$(toolkit_fingerprint "$_tk_out")" || return 1
     echo "$_tk_version-$_tk_fingerprint" > "$_tk_out/version.txt"
 }
 
@@ -86,15 +123,24 @@ import sys
 
 folder, commit, base, minimum = sys.argv[1:5]
 files = {}
-for directory, folders, names in os.walk(folder):
+def unreadable(error):
+    raise error
+
+for directory, folders, names in os.walk(folder, onerror=unreadable):
     folders.sort()
+    for name in folders:
+        path = os.path.join(directory, name)
+        if os.path.islink(path):
+            sys.exit(f"toolkit: {os.path.relpath(path, folder)} is a link; a toolkit holds only plain files")
     for name in sorted(names):
         path = os.path.join(directory, name)
         relative = os.path.relpath(path, folder)
-        if relative == "toolkit.json":
-            continue
         if os.path.islink(path):
             sys.exit(f"toolkit: {relative} is a link; a toolkit holds only plain files")
+        if not os.path.isfile(path):
+            sys.exit(f"toolkit: {relative} is not a plain file")
+        if relative == "toolkit.json":
+            continue
         digest = hashlib.sha256()
         with open(path, "rb") as handle:
             for block in iter(lambda: handle.read(1 << 20), b""):

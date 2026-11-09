@@ -57,21 +57,39 @@ extension Toolkit {
         return nil
     }
 
-    /// What the build script writes after the release version: the first 12 hex digits of the
-    /// sha256 of the relinker, the libraries and the patches, one after the other.
     static func fingerprint(of root: URL) -> String? {
         let fileManager = FileManager.default
-        let relinker = root.appendingPathComponent("relinker")
-        guard fileManager.fileExists(atPath: relinker.path) else { return nil }
-        func files(_ folder: String, _ suffix: String) -> [URL] {
-            ((try? fileManager.contentsOfDirectory(atPath: root.appendingPathComponent(folder).path)) ?? [])
-                .filter { $0.hasSuffix(suffix) }.sorted().map { root.appendingPathComponent(folder).appendingPathComponent($0) }
+        do {
+            var paths = ["relinker", "vulkan/libvulkan.1.dylib", "vulkan/libMoltenVK.dylib", "vulkan/MoltenVK_icd.json"]
+            for (folder, suffix) in [("libs", ".prx"), ("patches", ".json")] {
+                let entries = try fileManager.contentsOfDirectory(atPath: root.appendingPathComponent(folder).path)
+                    .filter { $0.hasSuffix(suffix) }.map { folder + "/" + $0 }
+                guard folder != "libs" || !entries.isEmpty else { return nil }
+                paths += entries
+            }
+            var hasher = SHA256()
+            for relative in paths.sorted(by: { $0.utf8.lexicographicallyPrecedes($1.utf8) }) {
+                let file = root.appendingPathComponent(relative).resolvingSymlinksInPath()
+                guard try fileManager.attributesOfItem(atPath: file.path)[.type] as? FileAttributeType == .typeRegular else { return nil }
+                let name = Data(relative.utf8)
+                let handle = try FileHandle(forReadingFrom: file)
+                defer { try? handle.close() }
+                let size = try handle.seekToEnd()
+                try handle.seek(toOffset: 0)
+                withUnsafeBytes(of: UInt64(name.count).bigEndian) { hasher.update(data: Data($0)) }
+                hasher.update(data: name)
+                withUnsafeBytes(of: size.bigEndian) { hasher.update(data: Data($0)) }
+                var read: UInt64 = 0
+                while let data = try handle.read(upToCount: 1 << 20), !data.isEmpty {
+                    read += UInt64(data.count)
+                    hasher.update(data: data)
+                }
+                guard read == size else { return nil }
+            }
+            return String(FileDigest.hex(hasher.finalize()).prefix(12))
+        } catch {
+            return nil
         }
-        var hasher = SHA256()
-        for file in [relinker] + files("libs", ".prx") + files("patches", ".json") {
-            guard (try? FileDigest.update(&hasher, with: file)) != nil else { return nil }
-        }
-        return String(FileDigest.hex(hasher.finalize()).prefix(12))
     }
 
     /// The release part of a toolkit version, without its fingerprint.

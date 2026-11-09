@@ -88,16 +88,69 @@ final class EngineToolkitTests: XCTestCase {
         XCTAssertNotNil(Toolkit.layoutProblem(at: scratch.appendingPathComponent("nothing")))
     }
 
-    /// A folder someone built without version.txt is named by the same fingerprint the build
-    /// script writes: sha256 of the relinker, the libraries and the patches, in that order.
     func testAFolderWithoutVersionIsNamedByItsFingerprint() throws {
         let folder = try FakeToolkit.make(in: scratch, version: nil)
-        var data = try Data(contentsOf: folder.appendingPathComponent("relinker"))
-        data += try Data(contentsOf: folder.appendingPathComponent("libs/libSceAgc.prx"))
-        data += try Data(contentsOf: folder.appendingPathComponent("libs/libSceAudioOut.prx"))
-        data += try Data(contentsOf: folder.appendingPathComponent("patches/PPSA02100.json"))
-        let expected = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined().prefix(12)
-        XCTAssertEqual(Toolkit(root: folder).version, "local-" + expected)
+        XCTAssertEqual(Toolkit(root: folder).version, "local-9375296f48d3")
+        XCTAssertEqual(try packagedFingerprint(folder), "9375296f48d3")
+    }
+
+    func packagedFingerprint(_ folder: URL) throws -> String {
+        let layout = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("toolkit_layout.sh")
+        return try ToolkitStore.output("/bin/sh", ["-c", ". \"$1\"; toolkit_fingerprint \"$2\"", "toolkit-test", layout.path, folder.path])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func testEveryGraphicsDependencyChangesTheFingerprintAndMatchesThePackager() throws {
+        let folder = try FakeToolkit.make(in: scratch, version: nil)
+        for name in ["é.prx", "Z.prx", "Å.prx", "a.prx"] {
+            try Data(name.utf8).write(to: folder.appendingPathComponent("libs/" + name))
+        }
+        let original = try XCTUnwrap(Toolkit.fingerprint(of: folder))
+        XCTAssertEqual(try packagedFingerprint(folder), original)
+        for name in ["libvulkan.1.dylib", "libMoltenVK.dylib", "MoltenVK_icd.json"] {
+            let file = folder.appendingPathComponent("vulkan/" + name)
+            let previous = try Data(contentsOf: file)
+            try (previous + Data("changed".utf8)).write(to: file)
+            let changed = try XCTUnwrap(Toolkit.fingerprint(of: folder))
+            XCTAssertNotEqual(changed, original, name)
+            XCTAssertEqual(try packagedFingerprint(folder), changed, name)
+            try previous.write(to: file)
+            XCTAssertEqual(Toolkit.fingerprint(of: folder), original)
+        }
+    }
+
+    func testFingerprintIncludesPathsAndFileBoundaries() throws {
+        let folder = try FakeToolkit.make(in: scratch, version: nil)
+        let first = folder.appendingPathComponent("libs/libSceAgc.prx")
+        let second = folder.appendingPathComponent("libs/libSceAudioOut.prx")
+        try Data("ab".utf8).write(to: first)
+        try Data("c".utf8).write(to: second)
+        let original = try XCTUnwrap(Toolkit.fingerprint(of: folder))
+        try Data("a".utf8).write(to: first)
+        try Data("bc".utf8).write(to: second)
+        let changed = try XCTUnwrap(Toolkit.fingerprint(of: folder))
+        XCTAssertNotEqual(changed, original)
+        XCTAssertEqual(try packagedFingerprint(folder), changed)
+        try FileManager.default.moveItem(at: first, to: first.deletingLastPathComponent().appendingPathComponent("renamed.prx"))
+        XCTAssertNotEqual(Toolkit.fingerprint(of: folder), changed)
+        XCTAssertEqual(try packagedFingerprint(folder), Toolkit.fingerprint(of: folder))
+    }
+
+    func testAnIncompleteRuntimeHasNoFingerprint() throws {
+        let folder = try FakeToolkit.make(in: scratch, version: nil)
+        for name in ["relinker", "libs", "patches", "vulkan/libvulkan.1.dylib", "vulkan/libMoltenVK.dylib", "vulkan/MoltenVK_icd.json"] {
+            let file = folder.appendingPathComponent(name)
+            let kept = scratch.appendingPathComponent("kept")
+            try FileManager.default.moveItem(at: file, to: kept)
+            XCTAssertNil(Toolkit.fingerprint(of: folder), name)
+            XCTAssertThrowsError(try packagedFingerprint(folder))
+            try FileManager.default.moveItem(at: kept, to: file)
+        }
+        let invalid = folder.appendingPathComponent("libs/not-a-file.prx")
+        try FileManager.default.createDirectory(at: invalid, withIntermediateDirectories: true)
+        XCTAssertNil(Toolkit.fingerprint(of: folder))
+        XCTAssertThrowsError(try packagedFingerprint(folder))
     }
 
     func testTheShortVersionKeepsTheReleaseAndAPieceOfTheFingerprint() {

@@ -5,9 +5,6 @@ import Foundation
 /// tools/macos/moltenvk_patches.py) and its driver manifest, and the per-title patches.
 public struct Toolkit: Sendable {
     public let root: URL
-    /// Changes whenever the relinker or the libraries change: an installed game made by another
-    /// toolkit can be installed again. version.txt, or for a folder someone put together without
-    /// one, "local-" and the fingerprint the build script would write.
     public let version: String
 
     public init(root: URL) {

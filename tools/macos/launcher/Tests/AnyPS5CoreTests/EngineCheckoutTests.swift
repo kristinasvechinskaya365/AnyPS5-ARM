@@ -222,6 +222,25 @@ final class EngineCheckoutTests: XCTestCase {
         XCTAssertThrowsError(try EngineGit.makeToolkit(from: checkout, vulkanFrom: nil, in: engines, release: "x"), "no MoltenVK to take")
     }
 
+    func testGraphicsRuntimeChangesCreateNewEnginesWithoutDiscardingThePreviousFiles() throws {
+        let checkout = try makeCheckout()
+        let kit = try makeToolkit()
+        let engines = root.appendingPathComponent("engines")
+        var previous = try EngineGit.makeToolkit(from: checkout, vulkanFrom: kit, in: engines, release: "0.2.29-arm")
+        for name in ["libvulkan.1.dylib", "libMoltenVK.dylib", "MoltenVK_icd.json"] {
+            let original = try Data(contentsOf: previous.vulkan.appendingPathComponent(name))
+            let changed = original + Data("changed".utf8)
+            try changed.write(to: kit.vulkan.appendingPathComponent(name))
+            let next = try EngineGit.makeToolkit(from: checkout, vulkanFrom: kit, in: engines, release: "0.2.29-arm")
+            XCTAssertNotEqual(next.version, previous.version, name)
+            XCTAssertNotEqual(next.root.path, previous.root.path, name)
+            XCTAssertEqual(try Data(contentsOf: next.vulkan.appendingPathComponent(name)), changed)
+            XCTAssertEqual(try Data(contentsOf: previous.vulkan.appendingPathComponent(name)), original)
+            XCTAssertEqual(try EngineGit.makeToolkit(from: checkout, vulkanFrom: kit, in: engines, release: "0.2.29-arm").root.path, next.root.path)
+            previous = next
+        }
+    }
+
     func testATreeWithChangesIsNotPulled() throws {
         let commands = FakeCommands()
         commands.answers["git status"] = (0, [" M core/relinker/main.cpp"])
