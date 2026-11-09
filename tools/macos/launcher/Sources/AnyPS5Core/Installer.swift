@@ -639,33 +639,55 @@ public final class Installer: @unchecked Sendable {
         }
     }
 
-    /// What the game wrote beside app0 in the old bundle (saves in _sd, trophies in _trophy, its
-    /// data and download folders) moves into the new one, so unlocking again keeps the progress.
-    /// Puts a finished bundle in place with its game outside it, in `data`/game, linked back as
-    /// Contents/Resources/game. macOS assesses an unsigned bundle each time it changed before
-    /// its code runs; with the gigabytes and the saves outside, that is a few seconds once
-    /// instead of minutes at every start. What the game wrote beside app0 in the old bundle (or
-    /// in the old data folder) moves into the new one.
     static func place(partial: URL, bundle: URL, data: URL) throws {
         let fileManager = FileManager.default
         let staged = partial.appendingPathComponent("Contents/Resources/game")
         let previous = bundle.appendingPathComponent("Contents/Resources/game")
         if fileManager.fileExists(atPath: previous.path) { try carryOver(from: previous.resolvingSymlinksInPath(), to: staged) }
-        if fileManager.fileExists(atPath: bundle.path) { try fileManager.removeItem(at: bundle) }
         let game = data.appendingPathComponent("game")
-        if fileManager.fileExists(atPath: game.path) { try fileManager.removeItem(at: game) }
         try fileManager.createDirectory(at: data, withIntermediateDirectories: true)
-        try fileManager.moveItem(at: staged, to: game)
+        let identifier = UUID().uuidString
+        let incoming = data.appendingPathComponent(".game-\(identifier).incoming")
+        let previousGame = data.appendingPathComponent(".game-\(identifier).previous")
+        let previousBundle = bundle.deletingLastPathComponent().appendingPathComponent(".\(bundle.lastPathComponent)-\(identifier).previous")
+        var retainIncoming = false
+        defer { if !retainIncoming { try? fileManager.removeItem(at: incoming) } }
+        try fileManager.moveItem(at: staged, to: incoming)
         let resources = bundle.appendingPathComponent("Contents/Resources")
         try fileManager.createSymbolicLink(atPath: staged.path, withDestinationPath: relativePath(from: resources, to: game))
         let libraries = bundle.appendingPathComponent("Contents/MacOS/libs")
-        for folder in [game, game.appendingPathComponent("app0")] {
+        for (folder, destination) in [(incoming, game), (incoming.appendingPathComponent("app0"), game.appendingPathComponent("app0"))] {
             let link = folder.appendingPathComponent("libs")
             guard (try? link.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true else { continue }
             try fileManager.removeItem(at: link)
-            try fileManager.createSymbolicLink(atPath: link.path, withDestinationPath: relativePath(from: folder, to: libraries))
+            try fileManager.createSymbolicLink(atPath: link.path, withDestinationPath: relativePath(from: destination, to: libraries))
         }
-        try fileManager.moveItem(at: partial, to: bundle)
+        var moved: [(source: URL, destination: URL)] = []
+        func move(_ source: URL, _ destination: URL) throws {
+            try fileManager.moveItem(at: source, to: destination)
+            moved.append((source, destination))
+        }
+        do {
+            if fileManager.fileExists(atPath: bundle.path) { try move(bundle, previousBundle) }
+            if fileManager.fileExists(atPath: game.path) { try move(game, previousGame) }
+            try move(incoming, game)
+            try move(partial, bundle)
+        } catch {
+            let failure = error
+            for item in moved.reversed() {
+                do {
+                    try fileManager.moveItem(at: item.destination, to: item.source)
+                } catch {
+                    retainIncoming = true
+                    let retained = [previousBundle, previousGame, incoming, game, bundle]
+                        .filter { fileManager.fileExists(atPath: $0.path) }.map(\.path).joined(separator: ", ")
+                    throw InstallError("install failed: \(failure.localizedDescription); could not restore \(item.source.path): \(error.localizedDescription). Files retained at: \(retained)")
+                }
+            }
+            throw failure
+        }
+        try? fileManager.removeItem(at: previousBundle)
+        try? fileManager.removeItem(at: previousGame)
     }
 
     /// `target` as a path relative to the folder `base`.
@@ -694,16 +716,16 @@ public final class Installer: @unchecked Sendable {
         return URL(fileURLWithPath: resolved).pathComponents + rest
     }
 
-    /// The game folder's items the game wrote (saves, trophies, data) move from `source` into
-    /// `target` unless the new game has them.
     static func carryOver(from source: URL, to target: URL) throws {
         let fileManager = FileManager.default
-        guard let entries = try? fileManager.contentsOfDirectory(atPath: source.path) else { return }
+        let entries = try fileManager.contentsOfDirectory(atPath: source.path)
         for name in entries where !fileManager.fileExists(atPath: target.appendingPathComponent(name).path) {
             let item = source.appendingPathComponent(name)
             // A link (game/libs) belongs to the bundle that made it.
             if (try? item.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true { continue }
-            try fileManager.moveItem(at: item, to: target.appendingPathComponent(name))
+            if copyfile(item.path, target.appendingPathComponent(name).path, nil, copyfile_flags_t(COPYFILE_CLONE | COPYFILE_RECURSIVE | COPYFILE_ACL)) != 0 {
+                throw InstallError("preserve \(name): \(String(cString: strerror(errno)))")
+            }
         }
     }
 
