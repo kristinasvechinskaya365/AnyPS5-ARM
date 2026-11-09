@@ -28,6 +28,81 @@ defaults:
     shell: bash
 
 jobs:
+  cmpxchg-reference-probe:
+    name: Diagnose the x86 CMPXCHG reference
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Check out the fixture without submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare the Rosetta reference
+        run: |
+          mkdir -p diagnostics/reference-probe
+          test "$(uname -m)" = arm64
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/reference-probe/rosetta.log
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Record both optimized and unoptimized reference results
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import platform
+          import re
+          import subprocess
+          from pathlib import Path
+
+          directory = Path("diagnostics/reference-probe").resolve()
+          source = Path("tools/translator/tests/cmpxchg_alias.c").resolve()
+          compiler = Path(subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip())
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["GITHUB_SHA"] or platform.system() != "Darwin" or platform.machine() != "arm64":
+              raise SystemExit("requires the event revision on native arm64 macOS")
+          report = {
+              "schema_version": 1, "revision": revision, "host": platform.platform(), "machine": platform.machine(),
+              "source": {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+              "compiler": {"path": str(compiler), "version": subprocess.check_output([compiler, "--version"], text=True)},
+              "execution": "x86_64 under Rosetta", "cases": [],
+          }
+          for optimization in ("O0", "O1"):
+              binary = directory / f"reference-{optimization}"
+              case = {"optimization": optimization, "passed": False, "commands": []}
+              report["cases"].append(case)
+              for stage, command in (
+                  ("build", [str(compiler), "-arch", "x86_64", f"-{optimization}", "-Wall", "-Wextra", "-Werror", "-DMAIN_WRAPPER", str(source), "-o", str(binary)]),
+                  ("run", ["/usr/bin/arch", "-x86_64", str(binary)]),
+              ):
+                  result = {"stage": stage, "command": command}
+                  case["commands"].append(result)
+                  try:
+                      completed = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=30)
+                  except (OSError, subprocess.TimeoutExpired) as error:
+                      result["error"] = str(error)
+                      break
+                  result.update(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+                  for stream in ("stdout", "stderr"):
+                      (directory / f"{optimization}-{stage}.{stream}.log").write_text(result[stream], encoding="utf-8")
+                  if stage == "build" and completed.returncode != 0:
+                      break
+                  if stage == "run":
+                      checksum = completed.stdout.strip()
+                      case["passed"] = bool(re.fullmatch(r"[0-9a-f]{16}", checksum)) and completed.returncode == (int(checksum, 16) & 0x7f)
+              (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          report["passed"] = len(report["cases"]) == 2 and all(case["passed"] for case in report["cases"])
+          (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          raise SystemExit(not report["passed"])
+          PY
+      - name: Upload reference probe diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cmpxchg-reference-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/reference-probe/
+          retention-days: 7
+          if-no-files-found: error
   native-fixtures:
     name: Required native arm64 CPU fixtures
     runs-on: macos-26

@@ -1,3 +1,7 @@
+#ifdef MAIN_WRAPPER
+#include <stdio.h>
+#endif
+
 typedef unsigned long long u64;
 typedef void (*Exchange)(u64*, u64*, u64, unsigned char*);
 
@@ -61,6 +65,9 @@ static unsigned subtraction_flags(u64 left, u64 right, unsigned bits) {
 }
 
 static void check(Exchange operation, unsigned bits, int aliased, u64 accumulator, u64 destination, u64 source) {
+#ifdef MAIN_WRAPPER
+    const u64 initial_accumulator = accumulator, initial_destination = destination;
+#endif
     const u64 mask = ~0ull >> (64 - bits);
     const u64 compared = aliased ? accumulator : destination;
     const int equal = (accumulator & mask) == (compared & mask);
@@ -73,6 +80,13 @@ static void check(Exchange operation, unsigned bits, int aliased, u64 accumulato
     unsigned actual_flags = 0;
     for (unsigned index = 0; index < 5; ++index) actual_flags |= (unsigned)flags[index] << index;
     if (accumulator != expected_accumulator || destination != expected_destination || actual_flags != expected_flags) {
+#ifdef MAIN_WRAPPER
+        fprintf(stderr, "bits=%u aliased=%d input_accumulator=%016llx input_destination=%016llx source=%016llx "
+                        "actual_accumulator=%016llx expected_accumulator=%016llx actual_destination=%016llx "
+                        "expected_destination=%016llx actual_flags=%02x expected_flags=%02x\n",
+                bits, aliased, initial_accumulator, initial_destination, source, accumulator, expected_accumulator,
+                destination, expected_destination, actual_flags, expected_flags);
+#endif
         puts(aliased ? "cmpxchg accumulator alias mismatch" : "cmpxchg register exchange mismatch");
         exit(1);
     }
