@@ -158,8 +158,8 @@ jobs:
             const relinkerHosts = (full, linux, intelMac = true) => JSON.stringify([
               ...(full && linux ? [] : [{ os: 'ubuntu-latest', compiler: 'g++' }]),
               ...(full ? [] : [{ os: 'windows-latest', compiler: 'g++' }]),
-              { os: 'macos-latest', compiler: 'clang++' },
-              ...(intelMac ? [{ os: 'macos-latest', compiler: 'clang++', architectures: 'x86_64' }] : []),
+              { os: 'macos-15', compiler: 'clang++' },
+              ...(intelMac ? [{ os: 'macos-15', compiler: 'clang++', architectures: 'x86_64' }] : []),
             ]);
             if (context.eventName === 'push' || process.env.VALIDATE_SOURCE === 'true') {
               if (!['refs/heads/main', 'refs/heads/codex/main-integration'].includes(context.ref)) {
@@ -341,6 +341,15 @@ jobs:
           7z x "$RUNNER_TEMP/winlibs.zip" -oC:/winlibs > /dev/null
       - if: runner.os == 'Windows'
         run: echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
+      - name: Select Xcode 26.3
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+        run: |
+          test -d "$DEVELOPER_DIR"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
       - if: ${{ matrix.architectures == 'x86_64' }}
         run: arch -x86_64 /usr/bin/true || sudo softwareupdate --install-rosetta --agree-to-license
       - run: cmake -S . -B build-relinker -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DANYPS5_RELINKER_ONLY=ON -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=${{ matrix.architectures }}
