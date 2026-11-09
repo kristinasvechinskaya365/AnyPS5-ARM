@@ -116,11 +116,14 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 75
     env:
-      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests'
+      PLACEMENT_BASELINE_REVISION: 861424137e7b0b801fa1f86958b486292a268a89
+      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests PlaceTests ProfileSavesTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests'
     steps:
       - name: Check out tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       - name: Record source and machine identity
         run: |
@@ -144,6 +147,118 @@ jobs:
         run: |
           sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
           test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Reproduce placement failures with the unchanged installer
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import signal
+          import subprocess
+          import xml.etree.ElementTree as ET
+          from tools.required_test_report import inventory, report, swift_outcomes
+
+          package = Path("tools/macos/launcher")
+          production = package / "Sources/AnyPS5Core/Installer.swift"
+          fixture = package / "Tests/AnyPS5CoreTests/PlaceTests.swift"
+          baseline = os.environ["PLACEMENT_BASELINE_REVISION"]
+          candidate = production.read_bytes()
+          previous = subprocess.check_output(["git", "show", baseline + ":" + str(production)])
+          expected = {
+              "testTheGameLivesOutsideTheBundle": [],
+              "testLinksStayShortUnderPrivate": [],
+              "testAnOldBundleKeepsItsSavesAndMovesOut": [],
+              "testUnlockingAgainKeepsSavesInTheDataFolder": [],
+              "testFailedDataDestinationPreservesLegacySavesAfterCleanup": [
+                  "failed placement must preserve the old executable",
+                  "failed placement must preserve save bytes after partial cleanup"],
+              "testFailedFinalMoveRestoresLegacyBundleAndSaves": [
+                  "failed placement must preserve the old executable",
+                  "failed placement must preserve save bytes after partial cleanup"],
+              "testFailedFinalMoveRestoresExternalBundleAndSaves": [
+                  "failed placement must preserve the old executable"],
+              "testSuccessfulReinstallPreservesNestedAndParkedSaves": [],
+              "testFailedFirstInstallLeavesNoGameAndCanRetry": [
+                  "failed first install must not leave an unowned game directory"],
+          }
+          expected = {"AnyPS5CoreTests.PlaceTests/" + name: markers for name, markers in expected.items()}
+          evidence = {"baseline_revision": baseline, "candidate_revision": os.environ["GITHUB_SHA"],
+                      "baseline_installer_sha256": hashlib.sha256(previous).hexdigest(),
+                      "candidate_installer_sha256": hashlib.sha256(candidate).hexdigest(),
+                      "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                      "commands": [], "expected_baseline_reproduced": False}
+          evidence_path = Path("diagnostics/placement-baseline.json")
+          def save():
+              evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+          def run(command, output, timeout):
+              with open(output, "w", encoding="utf-8") as stream:
+                  process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                  timed_out = False
+                  try:
+                      process.wait(timeout=timeout)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      os.killpg(process.pid, signal.SIGKILL)
+                      process.wait(timeout=10)
+              evidence["commands"].append({"command": command, "log": output,
+                                           "exit_code": process.returncode, "timed_out": timed_out})
+              save()
+              if timed_out:
+                  raise SystemExit("the installer baseline must finish normally")
+              return process.returncode
+          save()
+          try:
+              production.write_bytes(previous)
+              if production.read_bytes() != previous or candidate == previous:
+                  raise SystemExit("the placement comparison requires distinct unchanged and repaired implementations")
+              if run(["swift", "test", "--package-path", str(package), "--jobs", "2", "list"],
+                     "diagnostics/placement-baseline-inventory.txt", 1800) != 0:
+                  raise SystemExit("the unchanged installer must build with the identical fixture")
+              code = run(["swift", "test", "--package-path", str(package), "--skip-build", "--verbose",
+                          "--parallel", "--num-workers", "1", "--filter", r"^AnyPS5CoreTests\.PlaceTests/",
+                          "--xunit-output", str(Path("diagnostics/placement-baseline.xml").resolve())],
+                         "diagnostics/placement-baseline.log", 120)
+              if code != 1:
+                  raise SystemExit("the unchanged installer must return its ordinary XCTest failure exit code")
+          finally:
+              production.write_bytes(candidate)
+              evidence["candidate_restored"] = production.read_bytes() == candidate
+              save()
+          names = inventory(Path("diagnostics/placement-baseline-inventory.txt"), "swift")
+          registered = {name for name in names if name.startswith("AnyPS5CoreTests.PlaceTests/")}
+          data = report(Path("diagnostics/placement-baseline-inventory.txt"), Path("diagnostics/placement-baseline.xml"),
+                        "swift", [re.escape(name) for name in expected], log_path=Path("diagnostics/placement-baseline.log"))
+          outcomes = swift_outcomes(Path("diagnostics/placement-baseline.log"), names)
+          text = Path("diagnostics/placement-baseline.log").read_text(encoding="utf-8")
+          blocks = list(re.finditer(r"Test Case '([^']+)' started\.(.*?)Test Case '\1' (passed|failed|skipped) \(", text, re.S))
+          checks = {}
+          for name, markers in expected.items():
+              method = name.split("/", 1)[1]
+              identities = {name.replace("/", "."), "-[" + name.replace("/", " ") + "]",
+                            "PlaceTests." + method, "-[PlaceTests " + method + "]"}
+              matching = [block for block in blocks if block[1] in identities]
+              status = "failed" if markers else "passed"
+              checks[name] = (outcomes.get(name) == status and len(matching) == 1
+                              and matching[0][3] == status and all(marker in matching[0][2] for marker in markers))
+          required_errors = {"required test " + name + ": failed" for name, markers in expected.items() if markers}
+          xml = ET.parse("diagnostics/placement-baseline.xml").getroot()
+          assertions_only = (not any(node.tag in ("error", "skipped") for node in xml.iter())
+                             and all(node.get("status") in (None, "run") for node in xml.iter("testcase"))
+                             and all(node.get(key) in (None, "0") for node in xml.iter()
+                                     if node.tag in ("testsuite", "testsuites") for key in ("errors", "skipped", "disabled")))
+          reproduced = (registered == set(expected) and data["required"] == 9 and data["failed"] == 4
+                        and data["passed"] == 5 and set(data["errors"]) == required_errors and all(checks.values()) and assertions_only)
+          evidence.update({"report": data, "diagnostic_checks": checks, "assertions_only": assertions_only,
+                           "expected_baseline_reproduced": reproduced})
+          save()
+          if not reproduced:
+              raise SystemExit("all four precise placement failures and five passing controls must be reproduced")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Unchanged installer baseline\n\nFour placement failures reproduced with their exact assertions; five controls passed. The candidate installer was restored before its build.\n")
+          PY
+          git diff --exit-code -- tools/macos/launcher/Sources/AnyPS5Core/Installer.swift
       - name: Build the command-line installer and discover every Swift test
         run: |
           swift build --package-path tools/macos/launcher --product anyps5-tool --jobs 2 2>&1 | tee diagnostics/swift-build.log
