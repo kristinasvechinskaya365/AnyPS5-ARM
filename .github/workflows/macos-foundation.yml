@@ -58,11 +58,23 @@ jobs:
     name: Portable runner and report tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Check out tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
+      - name: Check repository conventions and pull request overlap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p diagnostics
+          python3 tools/check_conventions.py --base origin/main 2>&1 | tee diagnostics/conventions.log
+          python3 tools/pr_overlap.py --branch HEAD --repo "$GITHUB_REPOSITORY" --jobs 2 2>&1 | tee diagnostics/pr-overlap.log
       - name: Run required Python suites
         run: |
           mkdir -p diagnostics
@@ -152,8 +164,8 @@ jobs:
           cmake --build build-foundation --parallel 2 --target \
             relinker guest_direct_memory_lifecycle_tests guest_direct_memory_for_app_tests 2>&1 | tee diagnostics/build.log
           file build-foundation/tests/guest_direct_memory_lifecycle_tests build-foundation/core/relinker/relinker > diagnostics/binaries.txt
-          lipo -verify_arch x86_64 build-foundation/tests/guest_direct_memory_lifecycle_tests
-          lipo -verify_arch x86_64 build-foundation/core/relinker/relinker
+          lipo build-foundation/tests/guest_direct_memory_lifecycle_tests -verify_arch x86_64
+          lipo build-foundation/core/relinker/relinker -verify_arch x86_64
           shasum -a 256 build-foundation/tests/guest_direct_memory_lifecycle_tests \
             build-foundation/core/relinker/relinker build-foundation/core/libs/libs/unpatched/libkernel.prx \
             build-foundation/core/libs/libs/unpatched/libc.prx > diagnostics/binary-sha256.txt
