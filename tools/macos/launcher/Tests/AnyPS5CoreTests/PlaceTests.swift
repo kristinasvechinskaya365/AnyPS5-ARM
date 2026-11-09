@@ -184,7 +184,7 @@ final class PlaceTests: XCTestCase {
         try immutable(staged, false)
         try fm.removeItem(at: staged)
         XCTAssertFalse(fm.fileExists(atPath: bundle.path))
-        XCTAssertFalse(fm.fileExists(atPath: data.appendingPathComponent("game").path))
+        XCTAssertFalse(fm.fileExists(atPath: data.appendingPathComponent("game").path), "failed first install must not leave an unowned game directory")
         try Installer.place(partial: try partial("X-1"), bundle: bundle, data: data)
         XCTAssertEqual(text(bundle.appendingPathComponent("Contents/MacOS/app0/eboot.bin")), "eboot")
         XCTAssertEqual(try fm.contentsOfDirectory(atPath: data.path), ["game"])
