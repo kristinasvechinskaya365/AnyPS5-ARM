@@ -111,6 +111,9 @@ void CheckTransition() {
     Protect(mapping.Data(), Page, Read | Write | Execute);
     WriteReturn(mapping.Data(), 44);
     Require(Call(mapping.Data()) == 44, "same-view RWX rewrite returned stale code");
+    Mapping inaccessible(allocation.Physical(), Page, 0);
+    Protect(inaccessible.Data(), Page, Read | Execute);
+    Require(Call(inaccessible.Data()) == 44, "initially inaccessible alias lost executable bytes");
 }
 
 void CheckAliases() {

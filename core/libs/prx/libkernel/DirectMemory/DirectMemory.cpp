@@ -34,14 +34,10 @@
 #include <vector>
 #elif defined(__APPLE__)
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
-#include <atomic>
-#include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <string>
 #include <sys/mman.h>
-#include <sys/resource.h>
-#include <sys/sysctl.h>
 #include <unistd.h>
 #elif defined(__EMSCRIPTEN__)
 #include <link.h>
@@ -333,24 +329,6 @@ void Trace(const char* format, ...) {
     va_end(args);
 }
 
-#if defined(__APPLE__)
-// Direct memory descriptors live at or above this number, out of the guest's way.
-constexpr int HostOnlyDescriptorFloor = 4096;
-
-// Every direct memory block holds a descriptor, and apps opened from Finder start with a soft limit of 256.
-bool RaiseOpenFileLimit() {
-    rlimit limit {};
-    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) return false;
-    int perProcess = OPEN_MAX;
-    std::size_t length = sizeof(perProcess);
-    ::sysctlbyname("kern.maxfilesperproc", &perProcess, &length, nullptr, 0);
-    const rlim_t ceiling = std::min<rlim_t>(limit.rlim_max, static_cast<rlim_t>(perProcess));
-    if (limit.rlim_cur >= ceiling) return false;
-    limit.rlim_cur = ceiling;
-    return ::setrlimit(RLIMIT_NOFILE, &limit) == 0;
-}
-#endif
-
 #if defined(__linux__)
 int PhysicalFile() {
     static const int file = [] {
@@ -455,36 +433,9 @@ public:
             throw std::system_error(error, std::system_category(), message);
         }
 #elif defined(__APPLE__)
-        // No memfd on macOS: an anonymous POSIX shared memory object, unlinked right away.
-        static std::atomic<unsigned> sequence {0};
-        char name[32];
-        std::snprintf(name, sizeof(name), "/aps5-dm-%d-%u", static_cast<int>(::getpid()), sequence.fetch_add(1));
-        file = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (file < 0 && errno == EMFILE && RaiseOpenFileLimit()) file = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (file < 0) throw std::system_error(errno, std::generic_category(), "create direct memory backing");
-        ::shm_unlink(name);
-        ::fcntl(file, F_SETFD, FD_CLOEXEC);
-        // The descriptor is the host's alone: move it above the numbers guest sockets and files
-        // use (guest sockets must stay below the descriptor set's 1024). A long game run holds
-        // well over a thousand of these, and below that line they left no number for a socket.
-        if (file < HostOnlyDescriptorFloor) {
-            const int moved = ::fcntl(file, F_DUPFD_CLOEXEC, HostOnlyDescriptorFloor);
-            if (moved < 0 && errno == EINVAL && RaiseOpenFileLimit()) {
-                const int again = ::fcntl(file, F_DUPFD_CLOEXEC, HostOnlyDescriptorFloor);
-                if (again >= 0) {
-                    ::close(file);
-                    file = again;
-                }
-            } else if (moved >= 0) {
-                ::close(file);
-                file = moved;
-            }
-        }
-        if (ftruncate(file, static_cast<off_t>(bytes)) != 0) {
-            const int error = errno;
-            ::close(file);
-            throw std::system_error(error, std::generic_category(), "size direct memory backing");
-        }
+        static_cast<void>(start);
+        memory = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+        if (memory == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "allocate direct memory backing");
 #else
         file = PhysicalFile();
         fileOffset = start;
@@ -518,7 +469,7 @@ public:
             CloseHandle(section);
         }
 #elif defined(__APPLE__)
-        if (file >= 0) ::close(file);
+        ::munmap(memory, bytes);
 #else
         if (hostWriteView != nullptr) ::munmap(hostWriteView, bytes);
 #endif
@@ -534,6 +485,23 @@ public:
         GuestArena::GuestArenaCommit_nid_postfix(reinterpret_cast<void*>(address), bytes, 0x04, PS5_PAGE_SIZE);
 #elif defined(_WIN32)
         GuestArena::GuestArenaMapDirect_nid_postfix(reinterpret_cast<void*>(address), bytes, section, offset, WinProtFromPosix(protection));
+#elif defined(__APPLE__)
+        const auto remap = [bytes](mach_vm_address_t source, mach_vm_address_t target, int flags) {
+            vm_prot_t current = VM_PROT_NONE;
+            vm_prot_t maximum = VM_PROT_NONE;
+            const kern_return_t result = mach_vm_remap(mach_task_self(), &target, bytes, 0, flags, mach_task_self(), source, FALSE, &current, &maximum, VM_INHERIT_SHARE);
+            if (result != KERN_SUCCESS) throw std::runtime_error(std::string("map direct memory backing: mach_vm_remap failed: ") + mach_error_string(result));
+            return target;
+        };
+        const auto unmap = [bytes](void* view) { ::munmap(view, bytes); };
+        std::unique_ptr<void, decltype(unmap)> prepared(nullptr, unmap);
+        auto source = reinterpret_cast<mach_vm_address_t>(memory) + offset;
+        if (protection != (PROT_READ | PROT_WRITE)) {
+            source = remap(source, 0, VM_FLAGS_ANYWHERE);
+            prepared.reset(reinterpret_cast<void*>(source));
+            if (::mprotect(prepared.get(), bytes, protection) != 0) throw std::system_error(errno, std::generic_category(), "protect direct memory backing view");
+        }
+        remap(source, static_cast<mach_vm_address_t>(address), VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
 #else
         if (::mmap(reinterpret_cast<void*>(address), bytes, protection, MAP_SHARED | MAP_FIXED, file, static_cast<off_t>(fileOffset + offset)) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map direct memory backing");
 #endif
@@ -545,6 +513,8 @@ private:
 #if defined(__EMSCRIPTEN__)
 #elif defined(_WIN32)
     HANDLE section = nullptr;
+#elif defined(__APPLE__)
+    void* memory = nullptr;
 #else
     int file = -1;
     void* hostWriteView = nullptr;
@@ -846,7 +816,9 @@ bool WriteSharedBacking(std::uintptr_t address, const void* source, std::size_t 
 
 void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int nativeProt, bool records = true) {
     ValidatePhysicalRange(phys, len);
+#ifndef __APPLE__
     if (records) EraseMappings(address, address + len);
+#endif
 #ifdef __EMSCRIPTEN__
     if (records && !MappingsSharingPhys(phys, phys + len).empty()) throw std::system_error(ENOTSUP, std::generic_category(), "WebAssembly memory cannot map one direct memory range at two addresses");
 #endif
@@ -857,7 +829,12 @@ void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int
         const auto runEnd = std::min(last, it->second.end);
         const auto bytes = static_cast<std::size_t>(runEnd - cursor);
         it->second.backing->Map(address + (cursor - phys), bytes, cursor - it->second.base, nativeProt);
-        if (records) InsertMapping(address + (cursor - phys), DirectMapping{address + (cursor - phys) + bytes, cursor, it->second.backing->MemoryType(), nativeProt, it->second.backing});
+        if (records) {
+#ifdef __APPLE__
+            EraseMappings(address + (cursor - phys), address + (cursor - phys) + bytes);
+#endif
+            InsertMapping(address + (cursor - phys), DirectMapping{address + (cursor - phys) + bytes, cursor, it->second.backing->MemoryType(), nativeProt, it->second.backing});
+        }
         cursor = runEnd;
     }
 #if defined(__linux__) || defined(__APPLE__)

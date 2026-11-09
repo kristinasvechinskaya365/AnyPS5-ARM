@@ -12,6 +12,7 @@
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <libproc.h>
+#include <mach/mach.h>
 #else
 #include <dirent.h>
 #endif
@@ -69,9 +70,9 @@ std::int64_t Allocate(std::size_t bytes) {
     return physical;
 }
 
-unsigned char* Map(std::int64_t physical, std::size_t bytes) {
+unsigned char* Map(std::int64_t physical, std::size_t bytes, int protection = 3) {
     void* address = nullptr;
-    Require(sceKernelMapDirectMemory(&address, bytes, 3, 0, physical, 0) == 0);
+    Require(sceKernelMapDirectMemory(&address, bytes, protection, 0, physical, 0) == 0);
     Require(address != nullptr);
     return static_cast<unsigned char*>(address);
 }
@@ -104,12 +105,7 @@ void CheckPartialReleaseKeepsBacking() {
     const auto baseline = OpenDescriptors();
     const auto physical = Allocate(PS5_PAGE_SIZE * 2);
     const auto allocated = OpenDescriptors();
-#if defined(__APPLE__)
-    Require(allocated.size() == baseline.size() + 1);
-    Require(std::includes(allocated.begin(), allocated.end(), baseline.begin(), baseline.end()));
-#else
     Require(allocated == baseline);
-#endif
     auto* first = Map(physical, PS5_PAGE_SIZE * 2);
     auto* alias = Map(physical, PS5_PAGE_SIZE * 2);
     first[PS5_PAGE_SIZE] = 53;
@@ -129,22 +125,58 @@ void CheckPartialReleaseKeepsBacking() {
 }
 
 #if defined(__APPLE__)
-void CheckFailedConstructionClosesDescriptor() {
+std::uint64_t VirtualBytes() {
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    Require(::task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS);
+    return info.virtual_size;
+}
+
+void ExerciseLargeBackingLifetime() {
+    constexpr std::size_t bytes = 8u << 20;
+    const auto physical = Allocate(bytes);
+    auto* first = Map(physical, bytes, 1);
+    auto* tail = Map(physical + bytes - PS5_PAGE_SIZE, PS5_PAGE_SIZE);
+    Require(first[0] == 0 && tail[PS5_PAGE_SIZE - 1] == 0);
+    tail[PS5_PAGE_SIZE - 1] = 91;
+    Require(first[bytes - 1] == 91);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(first), bytes) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(tail), PS5_PAGE_SIZE) == 0);
+    Require(sceKernelReleaseDirectMemory(physical, bytes) == 0);
+}
+
+void CheckBackingVirtualMemoryIsReleased() {
+    ExerciseLargeBackingLifetime();
+    const auto descriptors = OpenDescriptors();
+    const auto before = VirtualBytes();
+    for (int round = 0; round < 64; ++round) ExerciseLargeBackingLifetime();
+    const auto after = VirtualBytes();
+    constexpr std::uint64_t allowance = 8u << 20;
+    std::printf("direct memory backing VM: before=%llu after=%llu allowance=%llu allocated=%llu\n", static_cast<unsigned long long>(before), static_cast<unsigned long long>(after), static_cast<unsigned long long>(allowance), static_cast<unsigned long long>(64u * (8u << 20)));
+    Require(after <= before || after - before <= allowance);
+    RequireDescriptors(descriptors);
+}
+
+void CheckFailedConstructionLeavesNoResources() {
     const auto baseline = OpenDescriptors();
+    const auto before = VirtualBytes();
     for (int round = 0; round < 32; ++round) {
         bool rejected = false;
         try {
-            CreateDirectMemoryBacking(0, std::numeric_limits<std::size_t>::max(), 0);
+            CreateDirectMemoryBacking(0, std::size_t{1} << 60, 0);
         } catch (const std::system_error& error) {
-            Require(error.code() == std::errc::invalid_argument);
+            Require(error.code() == std::errc::not_enough_memory);
             rejected = true;
         }
         Require(rejected);
     }
     RequireDescriptors(baseline);
+    const auto after = VirtualBytes();
+    constexpr std::uint64_t allowance = 8u << 20;
+    Require(after <= before || after - before <= allowance);
     ExerciseLifetime(true);
     RequireDescriptors(baseline);
-    std::puts("Failed backing construction closed every descriptor and left allocation usable");
+    std::puts("Failed backing allocation retained no resources and left allocation usable");
 }
 #endif
 
@@ -156,6 +188,7 @@ int main() {
     CheckRepeatedLifetimes();
     CheckPartialReleaseKeepsBacking();
 #if defined(__APPLE__)
-    CheckFailedConstructionClosesDescriptor();
+    CheckBackingVirtualMemoryIsReleased();
+    CheckFailedConstructionLeavesNoResources();
 #endif
 }
