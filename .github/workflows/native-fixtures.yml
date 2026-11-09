@@ -28,8 +28,8 @@ defaults:
     shell: bash
 
 jobs:
-  cmpxchg-alias-reference:
-    name: Require both x86 CMPXCHG alias references
+  scalar-references:
+    name: Require scalar x86 references at both optimization levels
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -54,7 +54,10 @@ jobs:
           from pathlib import Path
 
           directory = Path("diagnostics/reference-probe").resolve()
-          source = Path("tools/translator/tests/cmpxchg_alias.c").resolve()
+          fixtures = {
+              "cmpxchg-alias": {"source": "cmpxchg_alias.c", "cases": 60, "expected": {"stdout": "ca6fbb61f3358b09", "exit_code": 9}},
+              "lea-address-size": {"source": "lea_address_size.c", "cases": 2800, "expected": {"stdout": "e294d24a144bdbf2", "exit_code": 114}},
+          }
           compiler = Path(subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip())
           sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
           revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -62,54 +65,58 @@ jobs:
               raise SystemExit("requires the event revision on native arm64 macOS")
           report = {
               "schema_version": 1, "revision": revision, "host": platform.platform(), "machine": platform.machine(),
-              "source": {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
               "compiler": {"path": str(compiler), "version": subprocess.check_output([compiler, "--version"], text=True)},
-              "execution": "x86_64 under Rosetta", "sdk": sdk, "fixture": "cmpxchg-alias", "required_cases": 60, "cases": [],
+              "execution": "x86_64 under Rosetta", "sdk": sdk, "fixtures": {}, "cases": [],
           }
-          for optimization in ("O0", "O1"):
-              binary = directory / f"reference-{optimization}"
-              case = {"optimization": optimization, "passed": False, "commands": []}
-              report["cases"].append(case)
-              for stage, command in (
-                  ("build", [str(compiler), "-isysroot", sdk, "-arch", "x86_64", f"-{optimization}", "-Wall", "-Wextra", "-Werror", "-DMAIN_WRAPPER", str(source), "-o", str(binary)]),
-                  ("run", ["/usr/bin/arch", "-x86_64", str(binary)]),
-              ):
-                  result = {"stage": stage, "command": command}
-                  case["commands"].append(result)
-                  try:
-                      completed = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=30)
-                  except (OSError, subprocess.TimeoutExpired) as error:
-                      result["error"] = str(error)
-                      break
-                  result.update(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
-                  for stream in ("stdout", "stderr"):
-                      (directory / f"{optimization}-{stage}.{stream}.log").write_text(result[stream], encoding="utf-8")
-                  if stage == "build" and completed.returncode != 0:
-                      break
-                  if stage == "run":
-                      checksum = completed.stdout.strip()
-                      case["passed"] = checksum == "ca6fbb61f3358b09" and completed.returncode == 9
-              (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-          report["passed"] = len(report["cases"]) == 2 and all(case["passed"] for case in report["cases"])
+          for name, fixture in fixtures.items():
+              source = Path("tools/translator/tests", fixture["source"]).resolve()
+              report["fixtures"][name] = {"source": {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+                                           "required_cases": fixture["cases"], "expected": fixture["expected"]}
+              for optimization in ("O0", "O1"):
+                  binary = directory / f"{name}-{optimization}"
+                  case = {"fixture": name, "optimization": optimization, "passed": False, "commands": []}
+                  report["cases"].append(case)
+                  for stage, command in (
+                      ("build", [str(compiler), "-isysroot", sdk, "-arch", "x86_64", f"-{optimization}", "-Wall", "-Wextra", "-Werror", "-DMAIN_WRAPPER", str(source), "-o", str(binary)]),
+                      ("run", ["/usr/bin/arch", "-x86_64", str(binary)]),
+                  ):
+                      result = {"stage": stage, "command": command}
+                      case["commands"].append(result)
+                      try:
+                          completed = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=30)
+                      except (OSError, subprocess.TimeoutExpired) as error:
+                          result["error"] = str(error)
+                          break
+                      result.update(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+                      for stream in ("stdout", "stderr"):
+                          (directory / f"{name}-{optimization}-{stage}.{stream}.log").write_text(result[stream], encoding="utf-8")
+                      if stage == "build" and completed.returncode != 0:
+                          break
+                      if stage == "run":
+                          actual = {"stdout": completed.stdout.strip(), "exit_code": completed.returncode}
+                          case["passed"] = actual == fixture["expected"]
+                  (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          required = [(name, optimization) for name in fixtures for optimization in ("O0", "O1")]
+          report["passed"] = [(case["fixture"], case["optimization"]) for case in report["cases"]] == required and all(case["passed"] for case in report["cases"])
           (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
           print(json.dumps(report, indent=2))
           raise SystemExit(not report["passed"])
           PY
-      - name: Upload alias reference diagnostics
+      - name: Upload scalar reference diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cmpxchg-alias-reference-${{ github.sha }}-${{ github.run_attempt }}
+          name: native-scalar-references-${{ github.sha }}-${{ github.run_attempt }}
           path: diagnostics/reference-probe/
           retention-days: 7
           if-no-files-found: error
   native-fixtures:
     name: Required native arm64 CPU fixtures
-    needs: cmpxchg-alias-reference
+    needs: scalar-references
     runs-on: macos-26
     timeout-minutes: 75
     env:
-      BASELINE_REVISION: a62670c7cb641bb176f9205a65e9f70f8e42a528
+      BASELINE_REVISION: 0f4afafc1931720100c5860095f99578f7c6fbca
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       REQUIRED_CTESTS: '^native_(fixture_reporting|translator_cli)$'
     steps:
@@ -134,7 +141,7 @@ jobs:
             xcrun --sdk macosx --show-sdk-path
             cmake --version
             python3 --version
-            printf 'Build cache: none restored\nCoverage: five native CPU fixtures, Rosetta references and the AMD integer model; no game or GPU validation\n'
+            printf 'Build cache: none restored\nCoverage: six native CPU fixtures, Rosetta references and the AMD integer model; no game or GPU validation\n'
           } 2>&1 | tee diagnostics/identity.txt
           python3 - <<'PY'
           import json
@@ -224,7 +231,7 @@ jobs:
           cmp build-translator/libaps5-translator-runtime.a build-translator-baseline/libaps5-translator-runtime.a
           lipo build-translator-baseline/aps5-translator -verify_arch arm64
           build-translator-baseline/aps5-translator --build-info --cpu apple-m1 | tee diagnostics/baseline-build-info.json
-          git diff "$BASELINE_REVISION" -- tools/translator/src/Lifter.cpp > diagnostics/cmpxchg-lifter.patch
+          git diff "$BASELINE_REVISION" -- tools/translator/src/Lifter.cpp > diagnostics/lifter.patch
           python3 - <<'PY'
           import hashlib
           import json
@@ -249,7 +256,7 @@ jobs:
           if data["baseline_revision"] != os.environ["BASELINE_REVISION"] or data["candidate_revision"] != os.environ["GITHUB_SHA"]:
               raise SystemExit("baseline and candidate source identities must match their selected revisions")
           PY
-      - name: Require both baseline CMPXCHG mismatches with the current fixtures
+      - name: Require the baseline address-size mismatch with the current fixtures
         timeout-minutes: 5
         run: |
           python3 - <<'PY' 2>&1 | tee diagnostics/baseline-check.log
@@ -262,8 +269,8 @@ jobs:
           from pathlib import Path
 
           errors = []
-          required = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register"]
-          failures = {"cmpxchg-alias": "cmpxchg accumulator alias mismatch", "cmpxchg-amd-register": "cmpxchg register exchange mismatch"}
+          required = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size"]
+          failures = {"lea-address-size": "lea address-size mismatch"}
           report_path = Path("diagnostics/native-baseline/report.json")
           command = [sys.executable, "tools/translator/tests/run_native_fixtures.py", "build-translator-baseline",
                      "build-arm64/core/libs/libs", "diagnostics/native-baseline", "--cpu", "apple-m1", "--report", str(report_path)]
@@ -283,22 +290,30 @@ jobs:
               report_digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
               require(report["schema_version"] == 1 and report["suite"] == "native-arm64", "unsupported baseline report schema")
               require(report["required_fixtures"] == required and [case["name"] for case in report["fixtures"]] == required, "baseline fixture inventory is incomplete")
-              require(report["complete"] is True and report["passed"] is False and report["counts"] == {"required": 5, "pass": 3, "fail": 2, "skip": 0}, "baseline must report three passes and two failures without skips")
+              require(report["complete"] is True and report["passed"] is False and report["counts"] == {"required": 6, "pass": 5, "fail": 1, "skip": 0}, "baseline must report five passes and one failure without skips")
               for case in report["fixtures"]:
                   require(case["required"] is True, f"baseline fixture is not required: {case['name']}")
                   require(case["stage"] == "compare" and case["status"] == ("fail" if case["name"] in failures else "pass"), f"unexpected baseline outcome: {case['name']}")
               work = Path(report["work"]).resolve()
               require(work.is_relative_to(report_path.parent.resolve()), "baseline evidence is outside its artifact directory")
-              for case in report["fixtures"][-2:]:
+              for case in report["fixtures"]:
                   name = case["name"]
-                  require(case["actual"] == {"exit_code": 1, "stdout": failures[name]}, f"baseline failed for a different reason: {name}")
+                  if name in failures:
+                      require(case["actual"] == {"exit_code": 1, "stdout": failures[name]}, f"baseline failed for a different reason: {name}")
+                  else:
+                      require(case["actual"] == case["expected"], f"baseline passing result differs from its reference: {name}")
                   checksum = case["expected"]["stdout"]
-                  require(re.fullmatch(r"[0-9a-f]{16}", checksum) is not None and case["expected"]["exit_code"] == (int(checksum, 16) & 0x7f), f"baseline reference checksum is invalid: {name}")
-                  reference_stages = ["reference-model"] if name == "cmpxchg-amd-register" else ["reference-build", "reference-run"]
-                  stages = [*reference_stages, "translate", "native-link", "native-run"]
+                  stages = ["translate", "native-link", "native-run"]
+                  if name in ("vector-smoke", "cmpxchg-alias", "lea-address-size"):
+                      require(re.fullmatch(r"[0-9a-f]{16}", checksum) is not None and case["expected"]["exit_code"] == (int(checksum, 16) & 0x7f), f"baseline reference checksum is invalid: {name}")
+                      stages = ["reference-build", "reference-run", *stages]
+                  if name == "lea-address-size":
+                      require(case["expected"] == {"exit_code": 114, "stdout": "e294d24a144bdbf2"}, "baseline LEA reference differs from the hardware-checked expectation")
+                  if name == "cmpxchg-amd-register":
+                      stages = ["reference-model", *stages]
                   require([entry["stage"] for entry in case["commands"]] == stages, f"baseline mismatch lacks completed build, reference or run stages: {name}")
                   for entry in case["commands"]:
-                      expected_exit = 1 if entry["stage"] == "native-run" else case["expected"]["exit_code"] if entry["stage"] == "reference-run" else 0
+                      expected_exit = case["actual"]["exit_code"] if entry["stage"] == "native-run" else case["expected"]["exit_code"] if entry["stage"] == "reference-run" else 0
                       require(type(entry["returncode"]) is int and entry["returncode"] == expected_exit and "error" not in entry, f"baseline command failed unexpectedly: {name}/{entry['stage']}")
                       for channel in ("stdout", "stderr"):
                           log = Path(entry[channel]).resolve()
@@ -321,7 +336,7 @@ jobs:
           print(json.dumps(result, indent=2))
           raise SystemExit(bool(errors))
           PY
-      - name: Execute all five required native fixtures and their references
+      - name: Execute all six required native fixtures and their references
         timeout-minutes: 10
         run: |
           python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm64/core/libs/libs \
@@ -341,9 +356,9 @@ jobs:
           from pathlib import Path
 
           errors = []
-          required_ctests = {"native_fixture_reporting": 23, "native_translator_cli": 4}
-          required_fixtures = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register"]
-          failures = {"cmpxchg-alias": "cmpxchg accumulator alias mismatch", "cmpxchg-amd-register": "cmpxchg register exchange mismatch"}
+          required_ctests = {"native_fixture_reporting": 25, "native_translator_cli": 4}
+          required_fixtures = ["import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size"]
+          failures = {"lea-address-size": "lea address-size mismatch"}
 
           def require(condition, message):
               if not condition:
@@ -358,7 +373,7 @@ jobs:
               label = "baseline" if baseline else "candidate"
               require(type(report["schema_version"]) is int and report["schema_version"] == 1 and report["suite"] == "native-arm64", f"unsupported {label} report schema")
               require(report["required_fixtures"] == required_fixtures and [case["name"] for case in report["fixtures"]] == required_fixtures, f"{label} fixture inventory is incomplete")
-              expected_counts = {"required": 5, "pass": 3 if baseline else 5, "fail": 2 if baseline else 0, "skip": 0}
+              expected_counts = {"required": 6, "pass": 5 if baseline else 6, "fail": 1 if baseline else 0, "skip": 0}
               require(report["complete"] is True and report["passed"] is (not baseline) and report["counts"] == expected_counts and all(type(value) is int for value in report["counts"].values()), f"unexpected {label} fixture counts")
               provenance = report["provenance"]
               require(provenance["host"]["system"] == "Darwin" and provenance["host"]["machine"] == "arm64" and provenance["requested_cpu"] == "apple-m1", f"{label} host or CPU is incorrect")
@@ -377,8 +392,8 @@ jobs:
                   require(tool["available"] is True and Path(tool["path"]).is_file() and (name == "reference_arch" or bool(tool["version"])), f"{label} required tool did not run: {name}")
               sources = {"import": "core/relinker/relinker/tests/macos/import_fixture.py", "lifter-smoke": "tools/translator/tests/lifter_smoke.c",
                          "vector-smoke": "tools/translator/tests/vector_smoke.c", "cmpxchg-alias": "tools/translator/tests/cmpxchg_alias.c",
-                         "cmpxchg-amd-register": "tools/translator/tests/cmpxchg_alias.c"}
-              reference_flags = {"vector-smoke": ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"], "cmpxchg-alias": []}
+                         "cmpxchg-amd-register": "tools/translator/tests/cmpxchg_alias.c", "lea-address-size": "tools/translator/tests/lea_address_size.c"}
+              reference_flags = {"vector-smoke": ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"], "cmpxchg-alias": [], "lea-address-size": []}
               work = Path(report["work"]).resolve()
               require(work.is_relative_to(artifact_directory.resolve()), f"{label} evidence is outside its artifact directory")
               for case in report["fixtures"]:
@@ -399,6 +414,8 @@ jobs:
                       require(case["reference"] == {"execution": "x86_64 under Rosetta", "optimization": "O0", "flags": reference_flags[name]}, f"unexpected {label} reference options: {name}")
                       checksum = case["expected"]["stdout"]
                       require(re.fullmatch(r"[0-9a-f]{16}", checksum) is not None and type(case["expected"]["exit_code"]) is int and case["expected"]["exit_code"] == (int(checksum, 16) & 0x7f), f"invalid {label} reference checksum: {name}")
+                  if name == "lea-address-size":
+                      require(case["expected"] == {"exit_code": 114, "stdout": "e294d24a144bdbf2"}, f"unexpected {label} LEA reference result")
                   if name == "cmpxchg-amd-register":
                       stages = ["reference-model", *stages]
                       reference = case["reference"]
@@ -450,7 +467,7 @@ jobs:
               baseline = verify_run(json.loads(baseline_path.read_text()), Path("build-translator-baseline"), Path("diagnostics/native-baseline"), baseline=True)
               comparison = json.loads(Path("diagnostics/baseline-comparison.json").read_text())
               require(comparison["expected_failure_reproduced"] is True and comparison["errors"] == [] and type(comparison["returncode"]) is int and comparison["returncode"] == 1, "baseline comparison did not reproduce the expected failure")
-              require(comparison["expected_failures"] == failures, "baseline comparison did not require both regressions")
+              require(comparison["expected_failures"] == failures, "baseline comparison did not require the address-size regression")
               require(comparison["baseline_revision"] == os.environ["BASELINE_REVISION"] and comparison["candidate_revision"] == os.environ["GITHUB_SHA"], "baseline comparison revisions do not match this run")
               require(comparison["report_sha256"] == hashlib.sha256(baseline_path.read_bytes()).hexdigest(), "baseline report changed after its expected-failure check")
               provenance = json.loads(Path("diagnostics/baseline-source.json").read_text())
@@ -473,8 +490,8 @@ jobs:
 
           result = {"revision": os.environ.get("GITHUB_SHA"), "passed": not errors, "required_ctests": list(required_ctests), "required_fixtures": required_fixtures, "errors": errors}
           Path("diagnostics/gate.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-          summary = f"### Native arm64 fixture gate\n\nRevision: `{result['revision']}`\n\nResult: {'FAIL' if errors else 'PASS'}; required CTests: 2; required native fixtures: 5.\n\n"
-          summary += "\n".join(f"- {error}" for error in errors) + "\n\nCoverage: five native CPU fixtures with x86-64 Rosetta references, the independent AMD integer model and two expected baseline CMPXCHG failures. This run does not validate games or GPU behavior.\n"
+          summary = f"### Native arm64 fixture gate\n\nRevision: `{result['revision']}`\n\nResult: {'FAIL' if errors else 'PASS'}; required CTests: 2; required native fixtures: 6.\n\n"
+          summary += "\n".join(f"- {error}" for error in errors) + "\n\nCoverage: six native CPU fixtures with x86-64 Rosetta references, the independent AMD integer model and the expected baseline LEA address-size failure. This run does not validate games or GPU behavior.\n"
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
               stream.write(summary)
           print(json.dumps(result, indent=2))

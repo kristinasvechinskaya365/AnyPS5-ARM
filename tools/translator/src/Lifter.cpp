@@ -213,6 +213,7 @@ llvm::Value* Lifter::Impl::Address(const Instruction& instruction, const x86_op_
             address = builder.CreateAdd(address, index);
         }
     }
+    if (instruction.x86.addr_size == 4) address = Resize(Resize(address, 32), 64);
     if (segment && memory.segment == X86_REG_FS) address = builder.CreateAdd(address, builder.CreateLoad(builder.getInt64Ty(), Field(StateLayout::FsBase)));
     if (segment && memory.segment == X86_REG_GS) address = builder.CreateAdd(address, builder.CreateLoad(builder.getInt64Ty(), Field(StateLayout::GsBase)));
     return address;

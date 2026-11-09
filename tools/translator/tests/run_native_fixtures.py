@@ -24,8 +24,9 @@ from import_fixture import fixture as import_fixture
 
 
 VECTOR_FLAGS = ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"]
-REQUIRED = ("import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register")
-REFERENCES = {"vector-smoke": ("vector_smoke.c", VECTOR_FLAGS), "cmpxchg-alias": ("cmpxchg_alias.c", [])}
+REQUIRED = ("import", "lifter-smoke", "vector-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size")
+REFERENCES = {"vector-smoke": ("vector_smoke.c", VECTOR_FLAGS), "cmpxchg-alias": ("cmpxchg_alias.c", []),
+              "lea-address-size": ("lea_address_size.c", [])}
 AMD_FLAGS = ["-DCMPXCHG_AMD_REGISTERS"]
 AMD_CONTRACT = "AMD64 CMPXCHG conditional register writes"
 COMPILED_TOOLS = ("guest_clang", "guest_clangxx", "llvm_nm", "llvm_objcopy", "guest_linker")
