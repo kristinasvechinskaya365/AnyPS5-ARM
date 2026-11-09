@@ -1270,6 +1270,8 @@
   "noticeStateUpToDate": "Güncel · %@ denetlendi",
   "desktopUpdateNoAnswer": "GitHub yanıt vermedi: bir süre sonra yeniden sorar",
   "noticeStateAvailableDetail": "Arka planda iner, imzası denetlenir; ne zaman yeniden başlatacağını sen seçersin",
+  "openReleasePage": "Sürüm sayfasını aç",
+  "manualReleaseDetail": "Otomatik kurulum için geçerli bir sürüm imzası gerekir.",
   "noticeStateDownloading": "AnyPS5 %@ indiriliyor · %%%d",
   "fonts": "Fontlar",
   "fontsIntro": "Oyunlar konsolun sistem fontlarını istediğinde bunları alır. Bazı oyunlar bunlar olmadan açılışta durur.",
