@@ -1,0 +1,152 @@
+name: macOS write watch
+
+on:
+  push:
+    branches: [main, 'codex/macos-*']
+    paths:
+      - .github/workflows/macos-write-watch.yml
+      - core/libs/prx/libc/src/GuestWriteWatch.cpp
+      - core/libs/prx/libc/include/**
+      - core/libs/tests/WriteWatch.cpp
+      - core/libs/tests/write_watch/**
+      - tools/required_test_report.py
+      - tools/tests/test_required_test_report.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-write-watch-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  write-watch:
+    name: Write watch (${{ matrix.architecture }})
+    runs-on: macos-26
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [arm64, x86_64]
+    env:
+      BASELINE_REVISION: 4200e985786e177698d518253a272786b6adfce2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      TEST_ARCHITECTURE: ${{ matrix.architecture }}
+      REQUIRED_TESTS: '^write_watch_(collect|register|host|host-hot|hot|threads)$'
+    steps:
+      - name: Check out candidate and baseline history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Record source and host identity
+        run: |
+          mkdir -p diagnostics
+          {
+            git rev-parse HEAD
+            git rev-parse "$BASELINE_REVISION"
+            sw_vers
+            uname -a
+            sysctl hw.model hw.memsize hw.ncpu machdep.cpu.brand_string
+            xcodebuild -version
+            xcrun clang++ --version
+            cmake --version
+            python3 --version
+            printf 'Test architecture: %s\nBuild cache: none restored\nCoverage: standalone CPU write-watch tests\n' "$TEST_ARCHITECTURE"
+          } 2>&1 | tee diagnostics/identity.txt
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff "$BASELINE_REVISION" -- core/libs/prx/libc/src/GuestWriteWatch.cpp > diagnostics/runtime.patch
+      - name: Install Ninja
+        run: brew install ninja 2>&1 | tee diagnostics/ninja-install.log
+      - name: Install and verify Rosetta
+        if: matrix.architecture == 'x86_64'
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          arch -x86_64 uname -m | tee diagnostics/rosetta-architecture.txt
+          test "$(arch -x86_64 uname -m)" = x86_64
+      - name: Configure the unchanged arm64 baseline
+        if: matrix.architecture == 'arm64'
+        run: |
+          mkdir -p "$RUNNER_TEMP/write-watch-baseline"
+          git archive "$BASELINE_REVISION" core/libs/prx/libc core/libs/tests/WriteWatch.cpp \
+            core/libs/tests/WriteWatchBacking.cpp core/libs/tests/write_watch/CMakeLists.txt \
+            | tar -x -C "$RUNNER_TEMP/write-watch-baseline"
+          shasum -a 256 "$RUNNER_TEMP/write-watch-baseline/core/libs/prx/libc/src/GuestWriteWatch.cpp" \
+            "$RUNNER_TEMP/write-watch-baseline/core/libs/tests/WriteWatch.cpp" \
+            "$RUNNER_TEMP/write-watch-baseline/core/libs/tests/write_watch/CMakeLists.txt" \
+            > diagnostics/baseline-source-sha256.txt
+          cmake -S "$RUNNER_TEMP/write-watch-baseline/core/libs/tests/write_watch" -B build-baseline -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 2>&1 | tee diagnostics/baseline-configure.log
+      - name: Require the baseline architecture-specific compiler failure
+        if: matrix.architecture == 'arm64'
+        timeout-minutes: 5
+        run: |
+          python3 - <<'PY' 2>&1 | tee diagnostics/baseline-check.log
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          log = Path("diagnostics/baseline-build.log")
+          command = ["cmake", "--build", "build-baseline", "--target", "write_watch_tests", "--parallel", "2"]
+          with log.open("wb") as stream:
+              completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=240)
+          output = log.read_text(errors="replace")
+          print(output)
+          errors = [line for line in output.splitlines() if re.search(r":\d+:\d+: (?:fatal )?error:", line)]
+          expected = r"GuestWriteWatch\.cpp:\d+:\d+: error: use of undeclared identifier '__builtin_ia32_pause'(?:;.*)?$"
+          reproduced = completed.returncode != 0 and bool(errors) and all(re.search(expected, line) for line in errors)
+          data = {"baseline_revision": os.environ["BASELINE_REVISION"], "candidate_revision": os.environ["GITHUB_SHA"],
+                  "architecture": "arm64", "command": command, "exit_code": completed.returncode,
+                  "compiler_errors": errors, "expected_failure_reproduced": reproduced}
+          Path("diagnostics/baseline-report.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Unchanged arm64 baseline\n\nExpected x86-intrinsic compiler error reproduced: " + str(reproduced) + "\n")
+          if not reproduced:
+              raise SystemExit("baseline must fail specifically because __builtin_ia32_pause is unavailable on arm64")
+          PY
+      - name: Configure and build the candidate
+        run: |
+          cmake -S core/libs/tests/write_watch -B build-write-watch -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$TEST_ARCHITECTURE" 2>&1 | tee diagnostics/configure.log
+          ctest --test-dir build-write-watch --show-only=json-v1 --no-tests=error > diagnostics/inventory.json
+          cmake --build build-write-watch --target write_watch_tests --parallel 2 2>&1 | tee diagnostics/build.log
+          file build-write-watch/tests/write_watch_tests | tee diagnostics/binary.txt
+          lipo build-write-watch/tests/write_watch_tests -verify_arch "$TEST_ARCHITECTURE"
+          shasum -a 256 build-write-watch/tests/write_watch_tests \
+            core/libs/prx/libc/src/GuestWriteWatch.cpp core/libs/prx/libc/include/PreciseWait.hpp \
+            core/libs/tests/WriteWatch.cpp core/libs/tests/write_watch/CMakeLists.txt > diagnostics/sha256.txt
+      - name: Execute all six required cases
+        run: |
+          ctest --test-dir build-write-watch -R "$REQUIRED_TESTS" --verbose --output-on-failure \
+            --timeout 30 --parallel 1 --no-tests=error \
+            --output-junit "$PWD/diagnostics/ctest.xml" 2>&1 | tee diagnostics/ctest.log
+      - name: Require every selected case to report a pass
+        if: always()
+        run: |
+          python3 tools/required_test_report.py --inventory diagnostics/inventory.json \
+            --junit diagnostics/ctest.xml --output diagnostics/report.json \
+            --require write_watch_collect --require write_watch_register --require write_watch_host \
+            --require write_watch_host-hot --require write_watch_hot --require write_watch_threads
+      - name: Upload write-watch evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-write-watch-${{ matrix.architecture }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/
+            build-write-watch/CMakeCache.txt
+            build-write-watch/CMakeFiles/CMakeConfigureLog.yaml
+            build-write-watch/Testing/Temporary/
+            build-baseline/CMakeCache.txt
+            build-baseline/CMakeFiles/CMakeConfigureLog.yaml
+          retention-days: 7
+          if-no-files-found: error
