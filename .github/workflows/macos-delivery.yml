@@ -2,7 +2,7 @@ name: macOS delivery
 
 on:
   push:
-    branches: [main, 'codex/macos-*']
+    branches: [main, 'codex/macos-*', 'codex/main-integration']
     paths:
       - .github/workflows/macos-delivery.yml
       - tools/macos/**
@@ -125,7 +125,7 @@ jobs:
     timeout-minutes: 75
     env:
       PLACEMENT_BASELINE_REVISION: 861424137e7b0b801fa1f86958b486292a268a89
-      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests PlaceTests ProfileSavesTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests'
+      REQUIRED_SWIFT_SUITES: 'EngineToolkitTests EngineCheckoutTests RelinkInputsTests InstallerRunTests PlaceTests ProfileSavesTests UpdatesTests SignedUpdateTests ReleaseSigningTests GameArchivesTests GameUpdatesTests UpdateChannelTests UpdateChannelLookupTests UpdateLookupTests UpdateDownloadTests ReleaseRepositoryTests InstallationCheckTests'
     steps:
       - name: Check out tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -292,7 +292,7 @@ jobs:
           swift test --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --jobs 2 list > diagnostics/swift-inventory.txt 2> diagnostics/swift-discovery.log
       - name: Execute required engine installation and update suites
         run: |
-          filter="^AnyPS5CoreTests\.(${REQUIRED_SWIFT_SUITES// /|})/"
+          filter="^(AnyPS5CoreTests\.(${REQUIRED_SWIFT_SUITES// /|})|AnyPS5Tests\.ReleaseSourcePanelTests)/"
           swift test --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --skip-build --verbose --parallel --num-workers 2 \
             --filter "$filter" --skip '^AnyPS5CoreTests\.EngineCheckoutTests/testAnEngineFromARealCheckoutsBuild$' \
             --xunit-output "$PWD/diagnostics/swift.xml" 2>&1 | tee diagnostics/swift-tests.log
@@ -311,6 +311,7 @@ jobs:
           for suite in os.environ["REQUIRED_SWIFT_SUITES"].split():
               method = r"/(?!testAnEngineFromARealCheckoutsBuild$)[^\s]+" if suite == "EngineCheckoutTests" else r"/[^\s]+"
               command.extend(["--require", r"AnyPS5CoreTests\." + re.escape(suite) + method])
+          command.extend(["--require", r"AnyPS5Tests\.ReleaseSourcePanelTests/[^\s]+"])
           raise SystemExit(subprocess.run(command).returncode)
           PY
       - name: Build both release architectures of the launcher and installer

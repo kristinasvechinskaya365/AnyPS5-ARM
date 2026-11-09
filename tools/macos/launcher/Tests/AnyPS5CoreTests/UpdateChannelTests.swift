@@ -108,7 +108,7 @@ final class UpdateChannelLookupTests: XCTestCase {
         let found = await Updates.lookup(current: "0.2.16-arm", channel: .nightly, session: session)
         guard case .newer(let release) = found else { return XCTFail("no nightly offered: \(found)") }
         XCTAssertEqual(release.tag, "v0.2.17-arm-nightly.20261025.2")
-        XCTAssertEqual(ChannelStub.asked, ["/repos/AnyTogether/AnyPS5-ARM/releases"])
+        XCTAssertEqual(ChannelStub.asked, ["/repos/kristinasvechinskaya365/AnyPS5-ARM/releases"])
     }
 
     /// Stable keeps asking for the latest release, as before the channels.
@@ -116,7 +116,7 @@ final class UpdateChannelLookupTests: XCTestCase {
         let found = await Updates.lookup(current: "0.2.15-arm", channel: .stable, session: session)
         guard case .newer(let release) = found else { return XCTFail("no release offered: \(found)") }
         XCTAssertEqual(release.tag, "v0.2.16-arm")
-        XCTAssertEqual(ChannelStub.asked, ["/repos/AnyTogether/AnyPS5-ARM/releases/latest"])
+        XCTAssertEqual(ChannelStub.asked, ["/repos/kristinasvechinskaya365/AnyPS5-ARM/releases/latest"])
     }
 
     /// Back on Stable from a nightly: the older stable release is never offered...

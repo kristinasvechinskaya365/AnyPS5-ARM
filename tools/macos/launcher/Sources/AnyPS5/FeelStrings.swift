@@ -7,6 +7,7 @@ enum TU {
         case controllerVibration, controllerVibrationDetail
         case noticeReady = "desktopNoticeReady", noticeReadyDetail, restartNow = "desktopRestartNow", later = "desktopLater", noticeWaiting = "desktopRestartWaiting", cancelRestart = "desktopCancelRestart"
         case stateIdle = "noticeStateIdle", stateChecking = "noticeStateChecking", stateUpToDate = "noticeStateUpToDate", stateFailed = "desktopUpdateNoAnswer", stateAvailableDetail = "noticeStateAvailableDetail", stateDownloading = "noticeStateDownloading"
+        case openReleasePage, manualReleaseDetail
     }
 
     static func text(_ key: Key) -> String { T.string(key.rawValue) }

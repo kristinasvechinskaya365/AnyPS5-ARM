@@ -8,6 +8,19 @@ enum Entry {
         // `AnyPS5 --render-preview <output folder> <games folder>` draws the screens into PNG files
         // without opening a window, for checking the design.
         let arguments = CommandLine.arguments
+        if arguments.contains("--verify-installation") {
+            do {
+                let report = try InstallationCheck.inspect()
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                FileHandle.standardOutput.write(try encoder.encode(report))
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data("AnyPS5 installation: \(error.localizedDescription)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         if let index = arguments.firstIndex(of: "--render-preview"), arguments.count > index + 2 {
             MainActor.assumeIsolated { PreviewRenderer.run(output: URL(fileURLWithPath: arguments[index + 1]), games: URL(fileURLWithPath: arguments[index + 2])) }
             return

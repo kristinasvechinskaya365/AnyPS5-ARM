@@ -1270,6 +1270,8 @@
   "noticeStateUpToDate": "Up to date · checked %@",
   "desktopUpdateNoAnswer": "No answer from GitHub: it asks again in a while",
   "noticeStateAvailableDetail": "Downloads in the background with its signature checked; you choose when to restart",
+  "openReleasePage": "Open release page",
+  "manualReleaseDetail": "Automatic installation requires a valid release signature.",
   "noticeStateDownloading": "Downloading AnyPS5 %@ · %d%%",
   "fonts": "Fonts",
   "fontsIntro": "What games get when they ask for the console's system fonts. Some games stop at start without them.",

@@ -1,0 +1,269 @@
+name: macOS installable app
+
+on:
+  push:
+    branches: [main, 'codex/main-integration', 'codex/macos-package-*']
+    paths:
+      - .github/workflows/macos-app.yml
+      - CMakeLists.txt
+      - cmake/**
+      - .gitmodules
+      - 3rdparty/**
+      - core/**
+      - tools/macos/**
+      - tools/release/**
+      - tools/required_test_report.py
+      - tools/tests/test_macos_install*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  installer:
+    name: Verified installer and unchanged failure reproductions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Require all installer cases and original failures
+        run: |
+          mkdir -p diagnostics
+          python3 - <<'PY' 2>&1 | tee diagnostics/installer-tests.log
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import unittest
+          from tools.tests import test_macos_install as fixtures
+
+          baseline = "57b3ae6b8e5f0b7f3b0ce1577e2e1d9a5b0f87fd"
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["GITHUB_SHA"]:
+              raise SystemExit("the checkout differs from the event revision")
+          original = fixtures.INSTALLER
+          blob = subprocess.check_output(["git", "show", baseline + ":tools/macos/install.sh"])
+          required = {
+              "test_copy_failure_preserves_previous_app": "failed installation must preserve the previous app bytes",
+              "test_missing_checksums_refuse_installation": "missing SHA256SUMS must refuse installation",
+              "test_missing_archive_checksum_refuses_installation": "SHA256SUMS without the app entry must refuse installation",
+          }
+          reproductions = []
+          with tempfile.TemporaryDirectory() as directory:
+              previous = Path(directory) / "install.sh"
+              previous.write_bytes(blob)
+              fixtures.INSTALLER = previous
+              try:
+                  for name, marker in required.items():
+                      result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([fixtures.MacOSInstallTests(name)]))
+                      passed = (result.testsRun == 1 and len(result.failures) == 1 and not result.errors and
+                                not result.skipped and marker in result.failures[0][1])
+                      reproductions.append({"test": name, "marker": marker, "reproduced": passed})
+              finally:
+                  fixtures.INSTALLER = original
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(fixtures.MacOSInstallTests)
+          registered = suite.countTestCases()
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          passed = (registered >= 20 and result.testsRun == registered and result.wasSuccessful() and
+                    not result.skipped and not result.expectedFailures and not result.unexpectedSuccesses)
+          report = {"revision": revision, "baseline": baseline,
+                    "baseline_sha256": hashlib.sha256(blob).hexdigest(),
+                    "candidate_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+                    "fixture_sha256": hashlib.sha256(Path(fixtures.__file__).read_bytes()).hexdigest(),
+                    "registered": registered, "executed": result.testsRun, "failures": len(result.failures),
+                    "errors": len(result.errors), "skipped": len(result.skipped), "baseline_reproductions": reproductions,
+                    "passed": passed and all(case["reproduced"] for case in reproductions)}
+          Path("diagnostics/installer-report.json").write_text(json.dumps(report, indent=2) + "\n")
+          if not report["passed"]:
+              raise SystemExit("the installer baseline and candidate gates did not pass")
+          PY
+      - name: Upload installer evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-installer-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 30
+          if-no-files-found: error
+  app:
+    name: Complete Rosetta engine and universal launcher
+    needs: installer
+    runs-on: macos-26
+    timeout-minutes: 150
+    env:
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+      ANYPS5_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Check out the exact source and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Record build identity
+        run: |
+          mkdir -p diagnostics dist
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            sw_vers
+            uname -m
+            xcodebuild -version
+            swift --version
+            cmake --version
+          } > diagnostics/identity.txt
+          git diff --exit-code
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 | tee diagnostics/rosetta.log
+          test "$(arch -x86_64 uname -m)" = x86_64
+          brew install ninja ccache
+      - name: Exercise real signed apps and placement failures
+        run: |
+          python3 - <<'PY' 2>&1 | tee diagnostics/installer-macos-tests.log
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import unittest
+
+          sys.path.insert(0, "tools/macos/tests")
+          import test_install_app as fixtures
+          required = {
+              "test_verified_archive_installs_and_its_real_macho_executes",
+              "test_final_rename_failure_restores_the_real_signed_previous_app",
+              "test_rehashed_archive_with_invalid_code_signature_cannot_replace_the_app",
+              "test_browser_archive_quarantine_is_preserved_on_the_installed_app",
+          }
+          names = set(unittest.defaultTestLoader.getTestCaseNames(fixtures.MacOSInstalledAppTests))
+          if names != required:
+              raise SystemExit("the real macOS installation fixture inventory changed")
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(fixtures.MacOSInstalledAppTests)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          passed = (result.testsRun == len(required) and result.wasSuccessful() and not result.skipped and
+                    not result.expectedFailures and not result.unexpectedSuccesses)
+          report = {"revision": os.environ["GITHUB_SHA"], "required": sorted(required), "executed": result.testsRun,
+                    "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped),
+                    "fixture_sha256": hashlib.sha256(Path(fixtures.__file__).read_bytes()).hexdigest(),
+                    "installer_sha256": hashlib.sha256(Path("tools/macos/install.sh").read_bytes()).hexdigest(), "passed": passed}
+          Path("diagnostics/installer-macos-report.json").write_text(json.dumps(report, indent=2) + "\n")
+          if not passed:
+              raise SystemExit("every real macOS installation fixture must execute and pass")
+          PY
+      - name: Restore compiler cache
+        uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d
+        with:
+          key: macos-app-x86_64
+          max-size: 3G
+          evict-old-files: job
+      - name: Acquire the pinned FFmpeg archive
+        timeout-minutes: 6
+        run: |
+          python3 tools/macos/fetch_ffmpeg.py --repo . --architecture x64 \
+            --destination "$RUNNER_TEMP/ffmpeg-x64" --report diagnostics/ffmpeg-acquisition.json
+      - name: Acquire and install the verified Vulkan SDK privately
+        timeout-minutes: 15
+        run: |
+          sdk_zip="$RUNNER_TEMP/vulkansdk-macos-1.4.363.0.zip"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --retry-max-time 300 \
+            --connect-timeout 30 --max-time 300 \
+            https://sdk.lunarg.com/sdk/download/1.4.363.0/mac/vulkansdk-macos-1.4.363.0.zip -o "$sdk_zip"
+          printf '%s  %s\n' 163431e0203c8215286a17cf393643ce6b951f77d1b4f74ab30821a1f0beb09b "$sdk_zip" \
+            | shasum -a 256 -c - | tee diagnostics/vulkan-archive-check.txt
+          ditto -x -k "$sdk_zip" "$RUNNER_TEMP/vulkan-installer"
+          installer="$RUNNER_TEMP/vulkan-installer/vulkansdk-macOS-1.4.363.0.app/Contents/MacOS/vulkansdk-macOS-1.4.363.0"
+          test -x "$installer"
+          "$installer" --root "$RUNNER_TEMP/VulkanSDK/1.4.363.0" --accept-licenses --default-answer \
+            --confirm-command copy_only=1 install com.lunarg.vulkan.core 2>&1 | tee diagnostics/vulkan-install.log
+          sdk="$RUNNER_TEMP/VulkanSDK/1.4.363.0/macOS"
+          test -f "$sdk/lib/libvulkan.1.dylib"
+          test -f "$sdk/lib/libMoltenVK.dylib"
+          printf 'VULKAN_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+          shasum -a 256 "$sdk/lib/libvulkan.1.dylib" "$sdk/lib/libMoltenVK.dylib" > diagnostics/vulkan-libraries.txt
+      - name: Build the complete default macOS engine
+        run: |
+          cmake -S . -B build-mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_APPLE_SILICON_PROCESSOR=x86_64 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFFMPEG_PREBUILT_DIR:PATH="$RUNNER_TEMP/ffmpeg-x64" 2>&1 | tee diagnostics/engine-configure.log
+          grep -Fx "FFMPEG_PREBUILT_DIR:PATH=$RUNNER_TEMP/ffmpeg-x64" build-mac/CMakeCache.txt
+          cmake --build build-mac --target relinker libs --parallel 2 2>&1 | tee diagnostics/engine-build.log
+          cp build-mac/CMakeCache.txt diagnostics/engine-CMakeCache.txt
+      - name: Provision pinned Swift archives in a private cache
+        timeout-minutes: 18
+        run: |
+          cache="$(mktemp -d "$RUNNER_TEMP/swiftpm-cache.XXXXXX")"
+          printf 'SWIFT_PACKAGE_CACHE=%s\n' "$cache" >> "$GITHUB_ENV"
+          python3 tools/macos/provision_swift_cache.py --package-path tools/macos/launcher \
+            --cache-path "$cache" --diagnostics diagnostics/package-cache
+          python3 tools/macos/resolve_packages.py --package-path tools/macos/launcher \
+            --cache-path "$cache" --diagnostics diagnostics/package-resolution
+          git diff --exit-code -- tools/macos/launcher/Package.swift tools/macos/launcher/Package.resolved
+      - name: Package the real engine and universal launcher
+        run: |
+          tools/macos/build_launcher_app.sh build-mac "$VULKAN_SDK" dist 2>&1 | tee diagnostics/app-build.log
+      - name: Exercise the real built-engine checkout
+        env:
+          ANYPS5_LIVE_CHECKOUT: ${{ github.workspace }}
+          ANYPS5_LIVE_TOOLKIT: ${{ github.workspace }}/dist/AnyPS5.app/Contents/Resources/toolkit
+        run: |
+          swift test --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --jobs 2 list \
+            > diagnostics/live-inventory.txt 2> diagnostics/live-discovery.log
+          swift test --package-path tools/macos/launcher --cache-path "$SWIFT_PACKAGE_CACHE" --skip-build \
+            --verbose --parallel --num-workers 2 \
+            --filter '^AnyPS5CoreTests.EngineCheckoutTests/' --xunit-output "$PWD/diagnostics/live.xml" \
+            2>&1 | tee diagnostics/live-tests.log
+          python3 tools/required_test_report.py --kind swift --inventory diagnostics/live-inventory.txt \
+            --junit diagnostics/live.xml --log diagnostics/live-tests.log --output diagnostics/live-report.json \
+            --require '^AnyPS5CoreTests\.EngineCheckoutTests/[^\s]+$'
+      - name: Verify the archived application without its build trees
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/AnyPS5.app dist/AnyPS5-macOS.zip
+          mkdir "$RUNNER_TEMP/standalone-app"
+          ditto -x -k dist/AnyPS5-macOS.zip "$RUNNER_TEMP/standalone-app"
+          mv tools/macos/launcher/.build "$RUNNER_TEMP/hidden-swift-build"
+          mv build-mac "$RUNNER_TEMP/hidden-engine-build"
+          mv "$RUNNER_TEMP/VulkanSDK" "$RUNNER_TEMP/hidden-vulkan-sdk"
+          python3 tools/macos/verify_launcher_app.py "$RUNNER_TEMP/standalone-app/AnyPS5.app" \
+            --revision "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --report diagnostics/standalone-report.json
+          cp tools/macos/install.sh dist/install.sh
+          (cd dist && shasum -a 256 AnyPS5-macOS.zip install.sh > SHA256SUMS)
+          sh dist/install.sh --archive dist/AnyPS5-macOS.zip --checksums dist/SHA256SUMS \
+            --destination "$RUNNER_TEMP/installed-app" 2>&1 | tee diagnostics/installed-app.log
+          python3 tools/macos/verify_launcher_app.py "$RUNNER_TEMP/installed-app/AnyPS5.app" \
+            --revision "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --report diagnostics/installed-report.json
+          git diff --exit-code
+      - name: Upload the verified installation files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: AnyPS5-macOS-${{ github.sha }}
+          path: |
+            dist/AnyPS5-macOS.zip
+            dist/install.sh
+            dist/SHA256SUMS
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload build and installation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-app-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 30
+          if-no-files-found: error

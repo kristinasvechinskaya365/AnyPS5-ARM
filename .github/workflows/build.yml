@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/main-integration']
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -43,7 +43,7 @@ env:
 
 jobs:
   eligibility:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/main-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -156,8 +156,8 @@ jobs:
               ...(intelMac ? [{ os: 'macos-latest', compiler: 'clang++', architectures: 'x86_64' }] : []),
             ]);
             if (context.eventName === 'push') {
-              if (context.ref !== 'refs/heads/main') {
-                throw new Error('Automatic full builds only run on main');
+              if (!['refs/heads/main', 'refs/heads/codex/main-integration'].includes(context.ref)) {
+                throw new Error('Automatic full builds require main or the integration branch');
               }
               let paths = [];
               let all = true;
@@ -186,7 +186,7 @@ jobs:
               core.setOutput('full', true);
               core.setOutput('relinker-hosts', relinkerHosts(true, true));
               await core.summary.addRaw(
-                `Building main at ${context.sha}: full builds enabled, ` +
+                `Building ${context.ref} at ${context.sha}: full builds enabled, ` +
                 `macOS relinker ${run.relinker ? 'enabled' : 'skipped'}, ` +
                 `register context tests ${run.registerContext ? 'enabled' : 'skipped'}, write watch tests ${run.writeWatch ? 'enabled' : 'skipped'}`
               ).write();

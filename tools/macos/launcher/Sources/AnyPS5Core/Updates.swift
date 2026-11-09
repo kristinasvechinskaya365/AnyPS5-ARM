@@ -10,8 +10,8 @@ import Foundation
 /// 0.2.16 < 0.2.16 + 766 commits < 0.2.17-nightly.20261025.1 < 0.2.17-nightly.20261025.2 <
 /// 0.2.17-nightly.20261026.1 < 0.2.17.
 public enum Updates {
-    public static let latestURL = URL(string: "https://api.github.com/repos/AnyTogether/AnyPS5-ARM/releases/latest")!
-    public static let releasesURL = URL(string: "https://api.github.com/repos/AnyTogether/AnyPS5-ARM/releases?per_page=30")!
+    public static var latestURL: URL? { ReleaseRepository.configured()?.latestURL }
+    public static var releasesURL: URL? { ReleaseRepository.configured()?.releasesURL(perPage: 30) }
     public static let assetName = "AnyPS5-macOS.zip"
 
     public enum Channel: String, Codable, CaseIterable, Sendable {
@@ -147,8 +147,8 @@ public enum Updates {
     }
 
     /// The latest release, when it is newer than `current`.
-    public static func check(current: String, channel: Channel = .stable, session: URLSession = .shared) async -> Release? {
-        guard case .newer(let release) = await lookup(current: current, channel: channel, session: session) else { return nil }
+    public static func check(current: String, channel: Channel = .stable, session: URLSession = .shared, bundle: Bundle = .main) async -> Release? {
+        guard case .newer(let release) = await lookup(current: current, channel: channel, session: session, bundle: bundle) else { return nil }
         return release
     }
 
@@ -161,8 +161,9 @@ public enum Updates {
 
     /// Asks GitHub for the channel's newest release, never a cache, so a release just out is
     /// seen at once: the latest release on Stable, the list of releases on Nightly.
-    public static func lookup(current: String, channel: Channel = .stable, session: URLSession = .shared) async -> Lookup {
-        var request = URLRequest(url: channel == .stable ? latestURL : releasesURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+    public static func lookup(current: String, channel: Channel = .stable, session: URLSession = .shared, bundle: Bundle = .main) async -> Lookup {
+        guard let repository = ReleaseRepository.configured(in: bundle) else { return .failed }
+        var request = URLRequest(url: channel == .stable ? repository.latestURL : repository.releasesURL(perPage: 30), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         guard let (data, response) = try? await session.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200 else { return .failed }
         let found: Release?

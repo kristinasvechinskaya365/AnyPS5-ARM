@@ -2,7 +2,7 @@ name: macOS write watch
 
 on:
   push:
-    branches: [main, 'codex/macos-*']
+    branches: [main, 'codex/macos-*', 'codex/main-integration']
     paths:
       - .github/workflows/macos-write-watch.yml
       - core/libs/prx/libc/src/GuestWriteWatch.cpp

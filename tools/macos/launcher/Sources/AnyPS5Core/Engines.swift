@@ -161,7 +161,7 @@ public enum ToolkitVerifier {
 
 /// The toolkits attached to the launcher's GitHub releases (AnyPS5-toolkit-macos-<release>.zip).
 public enum EngineCatalogue {
-    public static let releasesURL = URL(string: "https://api.github.com/repos/AnyTogether/AnyPS5-ARM/releases?per_page=40")!
+    public static var releasesURL: URL? { ReleaseRepository.configured()?.releasesURL(perPage: 40) }
     public static let assetPrefix = "AnyPS5-toolkit-macos-"
 
     public struct Entry: Codable, Equatable, Sendable, Identifiable {
@@ -259,8 +259,9 @@ public enum EngineCatalogue {
     }
 
     /// GitHub's list of releases, never a cache; nil without an answer.
-    public static func fetch(session: URLSession = .shared) async -> [Entry]? {
-        var request = URLRequest(url: releasesURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+    public static func fetch(session: URLSession = .shared, bundle: Bundle = .main) async -> [Entry]? {
+        guard let repository = ReleaseRepository.configured(in: bundle) else { return nil }
+        var request = URLRequest(url: repository.releasesURL(perPage: 40), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         guard let (data, response) = try? await session.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return entries(from: data)

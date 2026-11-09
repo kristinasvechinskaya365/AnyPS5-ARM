@@ -32,6 +32,16 @@ sign() {
 }
 
 sign_toolkit "$toolkit" "$identity"
+version="$(cat "$toolkit/version.txt")"
+fingerprint="$(toolkit_fingerprint "$toolkit")"
+printf '%s-%s\n' "${version%-*}" "$fingerprint" > "$toolkit/version.txt"
+if [ -f "$app/Contents/MacOS/anyps5-tool" ]; then
+    if [ "$identity" = "-" ]; then
+        sign "$app/Contents/MacOS/anyps5-tool"
+    else
+        sign --options runtime "$app/Contents/MacOS/anyps5-tool"
+    fi
+fi
 # WebRTC for party voice, signed as ours so library validation lets the app load it.
 [ ! -d "$app/Contents/Frameworks/WebRTC.framework" ] || sign "$app/Contents/Frameworks/WebRTC.framework"
 # LiveKit's WebRTC and its Rust helper (the optional media server), the same way.
@@ -39,7 +49,11 @@ for framework in LiveKitWebRTC RustLiveKitUniFFI; do
     [ ! -d "$app/Contents/Frameworks/$framework.framework" ] || sign "$app/Contents/Frameworks/$framework.framework"
 done
 # The microphone (party voice) under the hardened runtime.
-sign --options runtime --entitlements "$(dirname "$0")/launcher/AnyPS5.entitlements" "$app"
+if [ "$identity" = "-" ]; then
+    sign --entitlements "$(dirname "$0")/launcher/AnyPS5.entitlements" "$app"
+else
+    sign --options runtime --entitlements "$(dirname "$0")/launcher/AnyPS5.entitlements" "$app"
+fi
 codesign --verify --deep --strict "$app"
 echo "signed $app"
 

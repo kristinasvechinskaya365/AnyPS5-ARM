@@ -30,7 +30,7 @@ extension AppModel {
     }
 
     /// What the screen offers, as the launcher's own update stands.
-    func updateRequiredRows() -> [PanelRow] {
+    func updateRequiredRows(bundle: Bundle = .main) -> [PanelRow] {
         guard let old = updateRequired else { return [] }
         var rows = [PanelRow(id: "required-why", title: old.current.map { TK.format(.updateRequiredTooOldVersion, $0) } ?? TK.text(.updateRequiredTooOld),
                              detail: TK.text(.updateRequiredDetail), symbol: "exclamationmark.arrow.triangle.2.circlepath", kind: .info(""), wraps: true)]
@@ -39,6 +39,9 @@ extension AppModel {
                                  symbol: "arrow.clockwise.circle.fill", kind: .action(destructive: false) { [weak self] in self?.restartForUpdate() }))
         } else if let progress = updateProgress {
             rows.append(PanelRow(id: "required-downloading", title: TK.format(.updateRequiredDownloading, Int(progress * 100)), symbol: "arrow.down.circle", kind: .info("")))
+        } else if let release = availableUpdate, release.signature == nil {
+            rows.append(PanelRow(id: "required-update", title: TU.text(.openReleasePage), detail: TU.text(.manualReleaseDetail),
+                                 symbol: "safari", kind: .action(destructive: false) { NSWorkspace.shared.open(release.page) }))
         } else if let release = availableUpdate, canReplaceItself {
             rows.append(PanelRow(id: "required-update", title: TK.format(.updateRequiredUpdate, release.version), detail: TK.text(.updateRequiredUpdateDetail),
                                  symbol: "arrow.down.circle.fill", kind: .action(destructive: false) { [weak self] in self?.installUpdate() }))
@@ -46,8 +49,9 @@ extension AppModel {
             rows.append(PanelRow(id: "required-looking", title: TK.text(.updateRequiredLooking), symbol: "magnifyingglass", kind: .info("")))
         }
         // The downloads page, when this copy cannot update itself or found nothing to install.
-        if readyUpdate == nil, updateProgress == nil, !(availableUpdate != nil && canReplaceItself), let page = old.downloadUrl {
-            rows.append(PanelRow(id: "required-download", title: TK.text(.updateRequiredDownload), detail: TK.text(.updateRequiredDownloadDetail),
+        if readyUpdate == nil, updateProgress == nil, !(availableUpdate != nil && (canReplaceItself || availableUpdate?.signature == nil)),
+           let page = ReleaseRepository.configured(in: bundle)?.releasesPageURL {
+            rows.append(PanelRow(id: "required-download", title: TK.text(.updateRequiredDownload), detail: page.absoluteString,
                                  symbol: "safari", kind: .action(destructive: false) { NSWorkspace.shared.open(page) }))
         }
         rows.append(PanelRow(id: "required-later", title: TK.text(.updateRequiredLater), symbol: "clock", kind: .action(destructive: false) { [weak self] in

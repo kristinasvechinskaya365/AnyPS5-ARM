@@ -383,8 +383,13 @@ extension AppModel {
         case .downloading(let version, _):
             about.append(PanelRow(id: "update", title: TU.format(.stateDownloading, version, updateState.percent ?? 0), symbol: "arrow.down.circle", kind: .info("")))
         case .available(let version):
-            about.append(PanelRow(id: "update", title: T.format(.updateTo, version), detail: canReplaceItself ? TU.text(.stateAvailableDetail) : T.text(.updateNotWritable),
-                                  symbol: "arrow.down.circle.fill", kind: .action(destructive: false) { [weak self] in self?.installUpdate() }))
+            if availableUpdate?.signature == nil {
+                about.append(PanelRow(id: "update", title: TU.text(.openReleasePage), detail: TU.text(.manualReleaseDetail),
+                                      symbol: "safari", kind: .action(destructive: false) { [weak self] in self?.installUpdate() }))
+            } else {
+                about.append(PanelRow(id: "update", title: T.format(.updateTo, version), detail: canReplaceItself ? TU.text(.stateAvailableDetail) : T.text(.updateNotWritable),
+                                      symbol: "arrow.down.circle.fill", kind: .action(destructive: false) { [weak self] in self?.installUpdate() }))
+            }
         default:
             break
         }

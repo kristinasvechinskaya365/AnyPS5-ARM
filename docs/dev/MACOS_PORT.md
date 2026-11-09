@@ -87,3 +87,50 @@ Changes on top of the merged port:
 - MoltenVK features
 
 Run them with `run.sh [libMoltenVK.dylib]`.
+
+## Installing a packaged app
+
+Use the app archive and checksum file from the same successful macOS build. Keep
+`install.sh`, `AnyPS5-macOS.zip` and `SHA256SUMS` together, then run:
+
+```sh
+sh install.sh --archive AnyPS5-macOS.zip --checksums SHA256SUMS
+```
+
+The installer uses macOS's built-in tools and defaults to `~/Applications/AnyPS5.app`.
+It requires macOS 14 or newer, checks the app's declared minimum system version,
+compatible executable and code-signature integrity, and preserves an existing app
+until its replacement is ready. Failed placement restores the previous app; if the
+destination prevents restoration, the error names the preserved recovery copy.
+`--destination DIR` selects another writable Applications folder. `--open` opens the
+app after installation; it stays closed by default. `--help` lists the options.
+
+An independently obtained archive checksum can replace the checksum file:
+
+```sh
+sh install.sh --archive AnyPS5-macOS.zip --sha256 SHA256
+```
+
+Replace `SHA256` with all 64 hexadecimal digits. A missing, duplicated or mismatched
+`AnyPS5-macOS.zip` entry in `SHA256SUMS` is an error. The first installation trusts the
+chosen GitHub build or release, or the separately supplied digest. An ad hoc code
+signature checks bundle integrity; it does not identify the publisher or provide
+Apple notarization. Browser quarantine and Gatekeeper settings are preserved.
+
+After the fork publishes `AnyPS5-macOS.zip` and `SHA256SUMS` as release assets, a
+checkout can install that release with:
+
+```sh
+sh tools/macos/install.sh --repository kristinasvechinskaya365/AnyPS5-ARM
+```
+
+This resolves the latest release once and downloads both files using that tag.
+`--version TAG` selects a published tag explicitly. The default repository is this
+fork; `--repository` or `ANYPS5_REPOSITORY` selects another repository. A missing fork
+release does not fall back to an upstream download. Release self-updates retain the
+launcher's trusted-signature checks described in [SIGNED_UPDATES](SIGNED_UPDATES.md).
+
+The launcher can run natively on Apple Silicon. Games using the x86-64 engine need
+Rosetta; the installer reports when it is missing. Install it separately with
+`softwareupdate --install-rosetta`, following Apple's prompts. A packaged app and its
+installation tests do not establish that a particular game or GPU workload works.

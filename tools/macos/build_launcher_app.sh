@@ -21,12 +21,26 @@ output="$(cd "$3" && pwd)"
 source="$root/tools/macos/launcher"
 app="$output/AnyPS5.app"
 version="$(toolkit_release_version "$root")"
+repository="${ANYPS5_REPOSITORY:-kristinasvechinskaya365/AnyPS5-ARM}"
+revision="$(git -C "$root" rev-parse HEAD)"
+python3 - "$repository" <<'PY'
+import re
+import sys
+
+if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", sys.argv[1]):
+    sys.exit("invalid GitHub repository: expected owner/name")
+PY
 # The release keys the app trusts for its updates (docs/dev/SIGNED_UPDATES.md) must be the ones
 # in tools/release/release-signing.pub.
 "$root/tools/release/embed_keys.sh" --check --swift-only
 
-swift build --package-path "$source" -c release --arch arm64 --arch x86_64 --product AnyPS5
-products="$(swift build --package-path "$source" -c release --arch arm64 --arch x86_64 --show-bin-path)"
+set -- --package-path "$source" -c release --arch arm64 --arch x86_64 --jobs 2
+if [ -n "${SWIFT_PACKAGE_CACHE:-}" ]; then
+    set -- "$@" --cache-path "$SWIFT_PACKAGE_CACHE"
+fi
+swift build "$@" --product AnyPS5
+swift build "$@" --product anyps5-tool
+products="$(swift build "$@" --show-bin-path)"
 binary="$products/AnyPS5"
 # WebRTC (party voice) is a framework beside the executable in the build; the app carries it in
 # Contents/Frameworks.
@@ -43,11 +57,20 @@ rm -rf "$app"
 toolkit="$app/Contents/Resources/toolkit"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/licenses"
 cp "$binary" "$app/Contents/MacOS/AnyPS5"
+cp "$products/anyps5-tool" "$app/Contents/MacOS/anyps5-tool"
 mkdir -p "$app/Contents/Frameworks"
 ditto "$webrtc" "$app/Contents/Frameworks/WebRTC.framework"
 for name in LiveKitWebRTC RustLiveKitUniFFI; do
     ditto "$(find "$products" -maxdepth 2 -name "$name.framework" -type d | head -n 1)" "$app/Contents/Frameworks/$name.framework"
 done
+for bundle in "$products"/*.bundle; do
+    [ -d "$bundle" ] || continue
+    ditto "$bundle" "$app/Contents/Resources/$(basename "$bundle")"
+done
+[ -d "$app/Contents/Resources/LiveKit_LiveKit.bundle" ] || {
+    echo "LiveKit_LiveKit.bundle not found in $products" >&2
+    exit 1
+}
 otool -l "$app/Contents/MacOS/AnyPS5" | grep -q "@executable_path/../Frameworks" ||
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/AnyPS5"
 webrtc_license="$(find "$source/.build/artifacts" -path '*WebRTC.xcframework/LICENSE' | head -n 1)"
@@ -94,6 +117,8 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
+    <key>AnyPS5Repository</key><string>$repository</string>
+    <key>AnyPS5Commit</key><string>$revision</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -140,9 +165,5 @@ EOF
 
 # ANYPS5_SIGN_IDENTITY ("Developer ID Application: …") signs it for distribution and, with
 # ANYPS5_NOTARY_PROFILE, has it notarized; without them it is signed ad hoc.
-if [ -n "${ANYPS5_SIGN_IDENTITY:-}" ]; then
-    "$root/tools/macos/sign_launcher_app.sh" "$app" "$ANYPS5_SIGN_IDENTITY" "${ANYPS5_NOTARY_PROFILE:-}"
-else
-    codesign --force --deep --sign - "$app"
-fi
+"$root/tools/macos/sign_launcher_app.sh" "$app" "${ANYPS5_SIGN_IDENTITY:--}" "${ANYPS5_NOTARY_PROFILE:-}"
 echo "$app"

@@ -899,7 +899,7 @@ final class AppModel: ObservableObject {
                 let first = self.availableUpdate?.tag != release.tag
                 self.availableUpdate = release
                 if self.readyUpdate?.release.tag == release.tag { return }
-                if self.canReplaceItself {
+                if self.canReplaceItself, release.signature != nil {
                     // Downloaded quietly; the notice comes once it is ready.
                     self.downloadUpdate(told: told)
                 } else if first || told {
@@ -966,6 +966,10 @@ final class AppModel: ObservableObject {
     /// Settings → About → Update: the download, or Restart Now once it is ready.
     func installUpdate() {
         if readyUpdate != nil { return restartForUpdate() }
+        if let release = availableUpdate, release.signature == nil {
+            NSWorkspace.shared.open(release.page)
+            return
+        }
         downloadUpdate(told: true)
     }
 

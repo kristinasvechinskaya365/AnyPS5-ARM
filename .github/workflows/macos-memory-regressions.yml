@@ -2,7 +2,7 @@ name: macOS memory regressions
 
 on:
   push:
-    branches: [main, 'codex/macos-*']
+    branches: [main, 'codex/macos-*', 'codex/main-integration']
     paths:
       - .github/workflows/macos-memory-regressions.yml
       - .github/anytogether-ci/ctest-known-failures.txt
