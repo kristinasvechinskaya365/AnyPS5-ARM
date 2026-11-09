@@ -187,7 +187,7 @@ struct Lifter::Impl {
 
     // Control flow
     void Push(llvm::Value* value);
-    llvm::Value* Pop();
+    llvm::Value* Pop(unsigned bits = 64);
     void CallGuest(std::uint64_t target, std::uint64_t returnAddress);
     void CallIndirect(llvm::Value* target, std::uint64_t returnAddress);
     void Jump(std::uint64_t target);

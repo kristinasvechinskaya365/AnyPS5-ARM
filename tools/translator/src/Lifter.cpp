@@ -320,10 +320,10 @@ void Lifter::Impl::Push(llvm::Value* value) {
     Store(Resize(value, 64), rsp);
 }
 
-llvm::Value* Lifter::Impl::Pop() {
+llvm::Value* Lifter::Impl::Pop(unsigned bits) {
     auto* rsp = Gpr64(Rsp);
-    auto* value = Load(builder.getInt64Ty(), rsp);
-    SetGpr64(Rsp, builder.CreateAdd(rsp, builder.getInt64(8)));
+    auto* value = Load(Int(bits), rsp);
+    SetGpr64(Rsp, builder.CreateAdd(rsp, builder.getInt64(bits / 8)));
     return value;
 }
 
@@ -877,10 +877,12 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
         if (instruction.Op(0).size != 8) throw Unsupported{"16-bit pop"};
         Write(instruction, 0, Pop());
         return;
-    case X86_INS_LEAVE:
+    case X86_INS_LEAVE: {
+        const unsigned bits = instruction.Prefixed(X86_PREFIX_OPSIZE) && !(x86.rex & 8) ? 16 : 64;
         SetGpr64(Rsp, Gpr64(Rbp));
-        SetGpr64(Rbp, Pop());
+        WritePart(Rbp, bits, Pop(bits));
         return;
+    }
     case X86_INS_CALL:
         if (const auto target = instruction.DirectTarget()) CallGuest(*target, instruction.Next());
         else CallIndirect(Read(instruction, 0, 64), instruction.Next());

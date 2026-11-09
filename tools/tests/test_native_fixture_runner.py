@@ -40,12 +40,12 @@ class NativeFixtureRunnerTests(unittest.TestCase):
                      "target_cpu": "apple-m1", "optimization": "O2", "capstone_api_version": "5.0"}
         self.results = {"import": (0, "hello from a PS5 ELF on macOS\n"), "lifter-smoke": (28, "3b0c6e4bf8726a1c\n"),
                         "vector-smoke": (42, "000000000000002a\n"), "cmpxchg-alias": (9, "ca6fbb61f3358b09\n"),
-                        "cmpxchg-amd-register": (118, "475cd741284f3476\n"), "lea-address-size": (114, "e294d24a144bdbf2\n")}
+                        "cmpxchg-amd-register": (118, "475cd741284f3476\n"), "lea-address-size": (114, "e294d24a144bdbf2\n"), "leave-operand-size": (14, "aa69bd1b27fa6a0e\n")}
         self.failures = {}
         self.calls = []
         self.architecture = 0x0100000C
         self.reference = {"vector-smoke": (42, "000000000000002a\n"), "cmpxchg-alias": (9, "ca6fbb61f3358b09\n"),
-                          "lea-address-size": (114, "e294d24a144bdbf2\n")}
+                          "lea-address-size": (114, "e294d24a144bdbf2\n"), "leave-operand-size": (14, "aa69bd1b27fa6a0e\n")}
         self.model = MODEL.reference()
         self.guest_compilations = []
 
@@ -111,15 +111,15 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(report["complete"])
         self.assertTrue(report["passed"])
-        self.assertEqual(report["counts"], {"required": 6, "pass": 6, "fail": 0, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 7, "fail": 0, "skip": 0})
         self.assertEqual([case["name"] for case in report["fixtures"]], list(RUNNER.REQUIRED))
         self.assertTrue(all(case["required"] for case in report["fixtures"]))
         for name in ("translator", "runtime", "libc", "runner", "guesttools"):
             self.assertRegex(report["provenance"][name]["sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(report["provenance"]["translator"]["build_info"], self.info)
-        self.assertIn("required=6 pass=6 fail=0 skip=0", output)
+        self.assertIn("required=7 pass=7 fail=0 skip=0", output)
         native_commands = [call for call in self.calls if pathlib.Path(call[0][0]).name == "eboot"]
-        self.assertEqual(len(native_commands), 6)
+        self.assertEqual(len(native_commands), 7)
         self.assertTrue(all(len(command) == 1 and kwargs["cwd"] == pathlib.Path(command[0]).parent for command, kwargs in native_commands))
         reference = next(command for command, _ in self.calls if command[0] == self.tools["guest_clang"]["path"])
         self.assertIn("-O0", reference)
@@ -133,7 +133,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertTrue(report["complete"])
                 self.assertFalse(report["passed"])
-                self.assertEqual(report["counts"], {"required": 6, "pass": 1, "fail": 0, "skip": 5})
+                self.assertEqual(report["counts"], {"required": 7, "pass": 1, "fail": 0, "skip": 6})
                 self.assertTrue(all(tool in case["reason"] for case in report["fixtures"][1:]))
                 self.tools[tool]["available"] = True
 
@@ -141,14 +141,14 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.tools["reference_arch"]["available"] = False
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 3, "fail": 0, "skip": 3})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 3, "fail": 0, "skip": 4})
         self.assertIn("reference_arch", report["fixtures"][2]["reason"])
 
     def test_reference_compilation_failure_is_not_a_skip(self):
         self.failures[("vector-smoke", "reference-build")] = (1, "", "missing SDK")
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
         case = report["fixtures"][2]
         self.assertEqual(case["stage"], "reference-build")
         self.assertIn("missing SDK", case["reason"])
@@ -165,11 +165,11 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.assertFalse(any(flag in command for flag in RUNNER.VECTOR_FLAGS))
         self.assertEqual([entry["stage"] for entry in case["commands"]], ["reference-build", "reference-run", "translate", "native-link", "native-run"])
 
-    def test_cmpxchg_mismatch_cannot_pass_the_other_five_results(self):
+    def test_cmpxchg_mismatch_cannot_pass_the_other_six_results(self):
         self.results["cmpxchg-alias"] = (1, "cmpxchg accumulator alias mismatch\n")
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
         case = report["fixtures"][3]
         self.assertEqual((case["name"], case["status"], case["stage"]), ("cmpxchg-alias", "fail", "compare"))
         self.assertTrue(report["complete"])
@@ -211,14 +211,14 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.tools["reference_python"]["available"] = False
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 0, "skip": 1})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 0, "skip": 1})
         self.assertIn("reference_python", report["fixtures"][4]["reason"])
 
     def test_amd_register_mismatch_cannot_pass_other_results(self):
         self.results["cmpxchg-amd-register"] = (1, "cmpxchg register exchange mismatch\n")
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
         self.assertEqual((report["fixtures"][4]["status"], report["fixtures"][4]["stage"]), ("fail", "compare"))
 
     def test_lea_reference_uses_only_its_required_compiler_flags(self):
@@ -233,12 +233,34 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.assertEqual([entry["stage"] for entry in case["commands"]], ["reference-build", "reference-run", "translate", "native-link", "native-run"])
         self.assertIn(("lea-address-size", "lea_address_size.c", []), self.guest_compilations)
 
-    def test_lea_mismatch_cannot_pass_the_other_five_results(self):
+    def test_lea_mismatch_cannot_pass_the_other_six_results(self):
         self.results["lea-address-size"] = (1, "lea address-size mismatch\n")
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
         self.assertEqual((report["fixtures"][5]["status"], report["fixtures"][5]["stage"]), ("fail", "compare"))
+
+    def test_leave_reference_uses_only_its_required_compiler_flags(self):
+        code, report, _ = self.run_suite()
+        self.assertEqual(code, 0)
+        case = report["fixtures"][6]
+        self.assertEqual(case["name"], "leave-operand-size")
+        self.assertEqual(case["reference"], {"execution": "x86_64 under Rosetta", "optimization": "O0", "flags": []})
+        self.assertEqual(case["compile_flags"], [])
+        self.assertEqual(case["expected"], {"exit_code": 14, "stdout": "aa69bd1b27fa6a0e"})
+        self.assertEqual(case["source"], RUNNER.file_identity(SOURCE.with_name("leave_operand_size.c")))
+        self.assertEqual([entry["stage"] for entry in case["commands"]], ["reference-build", "reference-run", "translate", "native-link", "native-run"])
+        self.assertIn(("leave-operand-size", "leave_operand_size.c", []), self.guest_compilations)
+
+    def test_leave_mismatch_cannot_pass_the_other_six_results(self):
+        self.results["leave-operand-size"] = (1, "leave operand-size mismatch\n")
+        code, report, _ = self.run_suite()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
+        self.assertEqual((report["fixtures"][6]["status"], report["fixtures"][6]["stage"]), ("fail", "compare"))
+        self.assertEqual(report["fixtures"][6]["actual"], {"exit_code": 1, "stdout": "leave operand-size mismatch"})
+        self.assertTrue(report["complete"])
+        self.assertFalse(report["passed"])
 
     def test_reference_crash_or_bad_checksum_cannot_define_success(self):
         for reference in ((-4, ""), (0, ""), (0, "000000000000002a\n"), (42, "not a checksum\n")):
@@ -254,7 +276,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.failures[("import", "translate")] = subprocess.TimeoutExpired("translator", 30, output=b"partial output", stderr=b"partial error")
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
         case = report["fixtures"][0]
         self.assertEqual(case["stage"], "translate")
         command = case["commands"][0]
@@ -266,7 +288,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.failures[("lifter-smoke", "fixture-build")] = subprocess.CalledProcessError(1, ["ld.lld"])
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
         self.assertEqual(report["fixtures"][1]["stage"], "fixture-build")
         self.assertIn("CalledProcessError", report["fixtures"][1]["reason"])
 
@@ -283,13 +305,13 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
         self.assertEqual(report["fixtures"][0]["stage"], "native-link")
-        self.assertEqual(report["counts"], {"required": 6, "pass": 5, "fail": 1, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 6, "fail": 1, "skip": 0})
 
     def test_x86_executable_is_rejected_before_execution(self):
         self.architecture = 0x01000007
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 0, "fail": 6, "skip": 0})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 0, "fail": 7, "skip": 0})
         self.assertTrue(all(case["stage"] == "native-architecture" for case in report["fixtures"]))
         self.assertFalse(any(pathlib.Path(command[0]).name == "eboot" for command, _ in self.calls))
 
@@ -297,7 +319,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.host["machine"] = "x86_64"
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"], {"required": 6, "pass": 0, "fail": 0, "skip": 6})
+        self.assertEqual(report["counts"], {"required": 7, "pass": 0, "fail": 0, "skip": 7})
         self.assertTrue(report["complete"])
         self.assertFalse(report["passed"])
         self.assertEqual(self.calls, [])
@@ -306,7 +328,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         (self.build / "libaps5-translator-runtime.a").unlink()
         code, report, _ = self.run_suite()
         self.assertEqual(code, 1)
-        self.assertEqual(report["counts"]["skip"], 6)
+        self.assertEqual(report["counts"]["skip"], 7)
         self.assertIn("runtime:", report["fixtures"][0]["reason"])
         self.assertEqual(self.calls, [])
 
@@ -317,7 +339,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
                 self.info[key] = value
                 code, report, _ = self.run_suite()
                 self.assertEqual(code, 1)
-                self.assertEqual(report["counts"], {"required": 6, "pass": 0, "fail": 6, "skip": 0})
+                self.assertEqual(report["counts"], {"required": 7, "pass": 0, "fail": 7, "skip": 0})
                 self.assertTrue(all(case["stage"] == "translator-info" for case in report["fixtures"]))
                 self.info[key] = previous
 
@@ -327,7 +349,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["provenance"]["requested_cpu"], "apple-m2")
         translations = [command for command, _ in self.calls if command[0] == str(self.build / "aps5-translator")]
-        self.assertEqual(len(translations), 7)
+        self.assertEqual(len(translations), 8)
         self.assertTrue(all(command[-2:] == ["--cpu", "apple-m2"] for command in translations))
 
     def test_new_work_directory_is_created_and_previous_run_is_preserved(self):
@@ -342,7 +364,7 @@ class NativeFixtureRunnerTests(unittest.TestCase):
         self.assertTrue(pathlib.Path(first["fixtures"][0]["commands"][0]["stdout"]).is_file())
 
     def test_missing_or_duplicate_results_cannot_pass(self):
-        for names in ((), ("import",), ("import",) * 6, RUNNER.REQUIRED[:-1], ("import", "vector-smoke", "lifter-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size")):
+        for names in ((), ("import",), ("import",) * 7, RUNNER.REQUIRED[:-1], ("import", "vector-smoke", "lifter-smoke", "cmpxchg-alias", "cmpxchg-amd-register", "lea-address-size", "leave-operand-size")):
             with self.subTest(names=names):
                 report = {"fixtures": [{"name": name, "status": "pass"} for name in names]}
                 RUNNER.write_report(self.root / "incomplete.json", report)
